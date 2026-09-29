@@ -1,0 +1,45 @@
+config: {}
+networks:
+- config:
+    ipv4.address: 10.195.251.1/24
+    ipv4.nat: "true"
+    ipv6.address: fd42:af03:d482:a8bc::1/64
+    ipv6.nat: "true"
+  description: ""
+  name: incusbr0
+  type: bridge
+  project: default
+storage_pools:
+- config:
+    size: 30GiB
+    source: /var/lib/incus/disks/default.img
+    zfs.pool_name: default
+  description: ""
+  name: default
+  driver: zfs
+storage_volumes: []
+profiles:
+- config: {}
+  description: Default Incus profile
+  devices:
+    eth0:
+      name: eth0
+      network: incusbr0
+      type: nic
+    root:
+      path: /
+      pool: default
+      type: disk
+  name: default
+  project: ""
+projects:
+- config:
+    features.images: "true"
+    features.networks: "true"
+    features.networks.zones: "true"
+    features.profiles: "true"
+    features.storage.buckets: "true"
+    features.storage.volumes: "true"
+  description: Default Incus project
+  name: default
+
