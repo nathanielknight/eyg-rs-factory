@@ -1,0 +1,18 @@
+# Bridge for locked-down EYG factory VMs. Per-VM filtering is done by the
+# ACLs attached in the eyg-agent / eyg-ci profiles. The network itself also
+# carries the (more permissive) eyg-agent ACL as a backstop for any NIC on this
+# bridge without its own ACL. That also works around an Incus 6.0 bug where
+# editing an ACL used only by NICs fails ("flush chain inet incus acl.eygbr0").
+description: EYG factory restricted VMs
+config:
+  ipv4.address: 10.196.0.1/24
+  ipv4.nat: "true"
+  ipv6.address: none
+  security.acls: eyg-agent
+  security.acls.default.egress.action: reject
+  security.acls.default.ingress.action: reject
+  # Incus always allows DNS to the bridge, so dnsmasq itself must refuse to
+  # forward anything else (otherwise DNS is an exfiltration channel).
+  raw.dnsmasq: |
+    no-resolv
+    server=/anthropic.com/1.1.1.1

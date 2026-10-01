@@ -1,0 +1,37 @@
+# CI VMs: only the coordinator port on the host. Everything else hits the
+# NIC's default reject.
+description: EYG factory CI - host coordinator port only
+egress:
+  # NIC-level ACLs get no built-in DHCP/DNS rules, so allow them explicitly.
+  # DHCP discover is broadcast; ipv4_filtering on the NIC already pins the
+  # source address.
+  - action: allow
+    protocol: udp
+    destination_port: "67"
+    description: DHCP
+    state: enabled
+  - action: allow
+    protocol: udp
+    destination: 10.196.0.1/32
+    destination_port: "53"
+    description: DNS (dnsmasq only forwards anthropic.com)
+    state: enabled
+  - action: allow
+    protocol: tcp
+    destination: 10.196.0.1/32
+    destination_port: "53"
+    description: DNS over TCP
+    state: enabled
+  - action: allow
+    protocol: tcp
+    destination: 10.196.0.1/32
+    destination_port: "8080"
+    description: coordinator API
+    state: enabled
+ingress:
+  - action: allow
+    protocol: udp
+    source: 10.196.0.1/32
+    source_port: "67"
+    description: DHCP replies
+    state: enabled
