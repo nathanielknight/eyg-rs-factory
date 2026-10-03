@@ -1,16 +1,14 @@
 #!/usr/bin/env -S uv run
 # /// script
 # requires-python = ">=3.13"
-# dependencies = [
-#     "click>=8.5.0",
-# ]
+# dependencies = []
 # ///
+import argparse
 import json
 import shlex
 import subprocess
 import sys
 
-import click
 
 
 SUITE = """
@@ -2225,16 +2223,17 @@ def run(test, cmd: str) -> None:
         )
 
 
-@click.command()
-@click.argument("cmd", type=str)
-@click.argument("idx", type=int, required=False)
-def main(cmd: str, idx: int | None = None):
-    if idx is None:
+def main(argv: list[str]) -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("cmd", help="command to test")
+    parser.add_argument("idx", type=int, nargs="?", default=None)
+    args = parser.parse_args(argv)
+    if args.idx is None:
         for test in suite:
-            run(test, cmd)
+            run(test, args.cmd)
     else:
-        run(getsource(idx), cmd)
+        run(getsource(args.idx), args.cmd)
 
 
 if __name__ == "__main__":
-    main()
+    main(sys.argv[1:])
