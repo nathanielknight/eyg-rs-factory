@@ -71,12 +71,8 @@ class Ticket(models.Model):
     def __str__(self) -> str:
         return f"#{self.pk or ''} {self.title}"
 
-    def transition_to(self, new_state: str, note: str = "") -> None:
-        """Move the ticket to `new_state`, enforcing the state machine.
-
-        Raises InvalidTransition if not allowed. If `note` is given, a
-        TicketNote is recorded atomically with the state change.
-        """
+    def transition_to(self, new_state: str) -> None:
+        """Move the ticket to `new_state`, enforcing the state machine. Raises InvalidTransition if not allowed."""
         new_state = TicketState(new_state)
         current = TicketState(self.state)
         if new_state not in ALLOWED_TRANSITIONS.get(current, set()):
