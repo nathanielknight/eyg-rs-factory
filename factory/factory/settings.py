@@ -10,6 +10,7 @@ For the full list of settings and their values, see
 https://docs.djangoproject.com/en/6.1/ref/settings/
 """
 
+import os
 from pathlib import Path
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
@@ -48,7 +49,11 @@ MIDDLEWARE = [
     "django.contrib.auth.middleware.AuthenticationMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
+    "ticket.middleware.SharedSecretAuthMiddleware",
 ]
+
+# Shared secret for /tickets/ API; managed out-of-band via environment.
+FACTORY_SHARED_SECRET = os.environ.get("FACTORY_SHARED_SECRET", "")
 
 ROOT_URLCONF = "factory.urls"
 
