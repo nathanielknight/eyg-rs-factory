@@ -10,6 +10,7 @@ For the full list of settings and their values, see
 https://docs.djangoproject.com/en/6.1/ref/settings/
 """
 
+import os
 from pathlib import Path
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
@@ -38,6 +39,7 @@ INSTALLED_APPS = [
     "django.contrib.messages",
     "django.contrib.staticfiles",
     "ticket",
+    "runner",
 ]
 
 MIDDLEWARE = [
@@ -48,7 +50,21 @@ MIDDLEWARE = [
     "django.contrib.auth.middleware.AuthenticationMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
+    "ticket.middleware.SharedSecretAuthMiddleware",
 ]
+
+# Shared secret for /tickets/ API; managed out-of-band via environment.
+FACTORY_SHARED_SECRET = os.environ.get("FACTORY_SHARED_SECRET", "")
+
+# Guest runner (see runner/). The Incus socket owns the host; only the factory
+# service user should be able to reach it.
+RUNNER_INCUS_SOCKET = os.environ.get(
+    "RUNNER_INCUS_SOCKET", "/var/lib/incus/unix.socket"
+)
+RUNNER_INCUS_PROJECT = os.environ.get("RUNNER_INCUS_PROJECT", "factory")
+RUNNER_RUN_ROOT = Path(os.environ.get("RUNNER_RUN_ROOT", BASE_DIR / "runs"))
+RUNNER_BOOT_TIMEOUT_S = 120
+RUNNER_HTTP_TIMEOUT_S = 30
 
 ROOT_URLCONF = "factory.urls"
 
