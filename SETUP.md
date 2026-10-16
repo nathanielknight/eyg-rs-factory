@@ -8,6 +8,24 @@ incus admin init --minimal           # or drop --minimal for the interactive set
 
 Test with `incus launch images:debian/13 test --vm`
 
+# Project
+
+The factory's images, profiles and instances live in their own Incus project,
+`factory` by default. Set `EYG_INCUS_PROJECT` to use a different name; every
+script reads it. The scripts create the project if it's missing, with its own
+images and profiles but the `default` project's networks and ACLs. Per-project
+networks need OVN, so the `eygbr0` bridge and `eyg-*` ACLs stay in `default`.
+The project's `default` profile is copied from the `default` project's (root
+disk and `incusbr0` NIC) the first time.
+
+To skip `--project factory` on manual commands, switch to it:
+
+```
+incus project switch factory
+```
+
+The examples below assume you have, or pass `--project factory` yourself.
+
 # Golden image
 
 The `eyg-golden` profile (`configfiles/incus-eyg-golden-profile.yaml`) builds a
@@ -15,7 +33,8 @@ Debian 13 VM (1 CPU, 4 GiB RAM, 20 GiB disk) via cloud-init with git, Node LTS +
 npm, `eyg-run`, Rust (rustup), uv + latest Python, and Claude Code. Tools are
 installed for the passwordless-sudo `agent` user; work goes in `/home/agent/work`.
 
-Build (or rebuild) the image and publish it as the local alias `eyg-golden`:
+Build (or rebuild) the image and publish it as the alias `eyg-golden` in the
+factory project:
 
 ```
 ./scripts/build-golden-image.sh
@@ -54,7 +73,8 @@ other VMs. DNS resolves only `anthropic.com` names. Spoofed source addresses are
 dropped. **Package registries are not reachable either**, so dependencies must
 be in the image or served via the coordinator.
 
-Create or update the bridge, ACLs and profiles (safe to re-run after editing
+Create or update the bridge and ACLs (in `default`) and the profiles (in the
+factory project) (safe to re-run after editing
 `configfiles/incus-eygbr0-network.yaml`, `incus-acl-eyg-*.yaml` or
 `incus-eyg-{agent,ci}-profile.yaml`):
 

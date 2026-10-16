@@ -3,9 +3,9 @@
 # Use with the Debian 13 (trixie) *cloud* image variant; the plain variant
 # doesn't ship cloud-init:
 #
-#   incus profile create eyg-golden
-#   incus profile edit eyg-golden < configfiles/incus-eyg-golden-profile.yaml
-#   incus launch images:debian/13/cloud eyg-golden-build --vm -p default -p eyg-golden
+#   incus profile create eyg-golden --project factory
+#   incus profile edit eyg-golden --project factory < configfiles/incus-eyg-golden-profile.yaml
+#   incus launch images:debian/13/cloud eyg-golden-build --project factory --vm -p default -p eyg-golden
 #
 # See scripts/build-golden-image.sh for the full build-and-publish flow.
 description: EYG factory golden image (git, node, rust, uv/python, claude, eyg-run)
