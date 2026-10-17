@@ -2,9 +2,9 @@
 # inbound API range (https://platform.claude.com/docs/en/api/ip-addresses).
 description: EYG factory agent - host coordinator port and Anthropic API
 egress:
-  # NIC-level ACLs get no built-in DHCP/DNS rules, so allow them explicitly.
-  # DHCP discover is broadcast; ipv4_filtering on the NIC already pins the
-  # source address.
+  # The bridge already allows DHCP/DNS to itself; these rules keep the ACL
+  # self-contained. DHCP discover is broadcast; ipv4_filtering on the NIC
+  # already pins the source address.
   - action: allow
     protocol: udp
     destination_port: "67"

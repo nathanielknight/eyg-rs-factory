@@ -1,7 +1,7 @@
 # Network profile for EYG factory agent VMs. Apply *after* eyg-golden so this
 # eth0 replaces the default profile's unrestricted one; scripts/launch-vm.sh
-# does this and checks the result.
-description: EYG factory agent network (see incus-acl-eyg-agent.yaml)
+# does this and checks the result. Filtering is the eygbr0 bridge's ACL.
+description: EYG factory agent network (eygbr0; see incus-acl-eyg-agent.yaml)
 config:
   # Claude Code's telemetry hosts are blocked; don't wait on them.
   environment.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
@@ -10,9 +10,6 @@ devices:
     type: nic
     name: eth0
     network: eygbr0
-    security.acls: eyg-agent
-    security.acls.default.egress.action: reject
-    security.acls.default.ingress.action: reject
     security.port_isolation: "true"
     security.mac_filtering: "true"
     security.ipv4_filtering: "true"
