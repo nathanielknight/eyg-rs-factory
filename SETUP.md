@@ -29,9 +29,10 @@ The examples below assume you have, or pass `--project factory` yourself.
 # Golden image
 
 The `eyg-golden` profile (`configfiles/incus-eyg-golden-profile.yaml`) builds a
-Debian 13 VM (1 CPU, 4 GiB RAM, 20 GiB disk) via cloud-init with git, Node LTS +
-npm, `eyg-run`, Rust (rustup), uv + latest Python, and Claude Code. Tools are
-installed for the passwordless-sudo `agent` user; work goes in `/home/agent/work`.
+Debian 13 VM (1 CPU, 4 GiB RAM, 20 GiB disk) via cloud-init with git, the `eyg`
+CLI (via `curl -fsSL https://eyg.run/install | bash`), Rust (rustup), uv +
+latest Python, and Claude Code. Tools are installed for the passwordless-sudo
+`agent` user; work goes in `/home/agent/work`.
 
 Build (or rebuild) the image and publish it as the alias `eyg-golden` in the
 factory project:

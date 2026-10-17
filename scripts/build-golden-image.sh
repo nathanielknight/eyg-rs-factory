@@ -42,8 +42,6 @@ echo "Checking tools..."
 pincus exec "$BUILDER" -- su - agent -c '
     set -e
     git --version
-    node --version
-    npm --version
     command -v eyg
     cargo --version
     uv --version
