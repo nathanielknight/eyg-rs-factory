@@ -22,15 +22,29 @@ trap 'echo "error: deleting $NAME" >&2; pincus delete --force "$NAME" 2>/dev/nul
 # The mode profile goes last so its eth0 replaces the default profile's.
 pincus launch eyg-golden "$NAME" --vm -p default -p eyg-golden -p "eyg-$MODE" < /dev/null
 
-# `incus config device get` doesn't see profile devices, so check the expanded
-# ones.
+# The bridge's ACL is what restricts the VM, so check both that eth0 is on the
+# mode's bridge and that the bridge carries the mode's ACL. `incus config device
+# get` doesn't see profile devices, so check the expanded ones.
+case "$MODE" in agent) BRIDGE=eygagentbr0 ;; ci) BRIDGE=eygcibr0 ;; esac
 incus query "/1.0/instances/$NAME?project=$PROJECT" | python3 -c '
 import json, sys
-mode = sys.argv[1]
+bridge = sys.argv[1]
 eth0 = json.load(sys.stdin)["expanded_devices"].get("eth0", {})
-ok = eth0.get("network") == "eygbr0" and eth0.get("security.acls") == "eyg-" + mode
-if not ok:
-    sys.exit(f"eth0 is not the restricted NIC: {eth0}")
+if eth0.get("network") != bridge or eth0.get("nictype"):
+    sys.exit(f"eth0 is not on {bridge}: {eth0}")
+' "$BRIDGE"
+incus query "/1.0/networks/$BRIDGE?project=default" | python3 -c '
+import json, sys
+mode = sys.argv[1]
+config = json.load(sys.stdin)["config"]
+want = {
+    "security.acls": "eyg-" + mode,
+    "security.acls.default.egress.action": "reject",
+    "security.acls.default.ingress.action": "reject",
+}
+bad = {k: config.get(k) for k, v in want.items() if config.get(k) != v}
+if bad:
+    sys.exit(f"bridge is not restricted for {mode}: {bad}")
 ' "$MODE"
 trap - EXIT
 

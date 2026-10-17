@@ -1,0 +1,20 @@
+# Bridge for EYG factory agent VMs; CI VMs get their own (eygcibr0). Each
+# bridge carries its mode's ACL, so the bridge a VM is on decides what it can
+# reach. The ACLs can't go on the NICs: Incus 6.0 looks NIC ACLs up in the
+# instance's project, and they live in `default` with the bridges ("Network ACL
+# not found" when a factory VM starts). NIC ACLs also hit an Incus 6.0 bug
+# where editing an ACL used only by NICs fails ("flush chain inet incus
+# acl.eygbr0").
+description: EYG factory agent VMs
+config:
+  ipv4.address: 10.196.0.1/24
+  ipv4.nat: "true"
+  ipv6.address: none
+  security.acls: eyg-agent
+  security.acls.default.egress.action: reject
+  security.acls.default.ingress.action: reject
+  # Incus always allows DNS to the bridge, so dnsmasq itself must refuse to
+  # forward anything else (otherwise DNS is an exfiltration channel).
+  raw.dnsmasq: |
+    no-resolv
+    server=/anthropic.com/1.1.1.1
