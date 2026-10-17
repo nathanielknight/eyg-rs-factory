@@ -14,10 +14,9 @@ The factory's images, profiles and instances live in their own Incus project,
 `factory` by default. Set `EYG_INCUS_PROJECT` to use a different name; every
 script reads it. The scripts create the project if it's missing, with its own
 images and profiles but the `default` project's networks and ACLs. Per-project
-networks need OVN, so the `eygbr0` / `eygcibr0` bridges and `eyg-*` ACLs stay
-in `default`.
-The project's `default` profile is copied from the `default` project's (root
-disk and `incusbr0` NIC) the first time.
+networks need OVN, so the `eygagentbr0` / `eygcibr0` bridges and `eyg-*` ACLs
+stay in `default`. The project's `default` profile is copied from the `default`
+project's (root disk and `incusbr0` NIC) the first time.
 
 To skip `--project factory` on manual commands, switch to it:
 
@@ -65,24 +64,24 @@ Run workloads in VMs on the restricted bridges, never on `incusbr0`. Each mode
 has its own bridge, and a host-side Incus ACL on the bridge enforces the limits,
 so root inside the guest can't lift them:
 
-| Mode    | Bridge (subnet)              | Can reach                                                      |
-|---------|------------------------------|----------------------------------------------------------------|
-| `ci`    | `eygcibr0` (10.197.0.0/24)   | host `10.197.0.1:8080` only                                    |
-| `agent` | `eygbr0` (10.196.0.0/24)     | host `10.196.0.1:8080` + Anthropic API (`160.79.104.0/23:443`) |
+| Mode    | Bridge (subnet)                 | Can reach                                                      |
+|---------|---------------------------------|----------------------------------------------------------------|
+| `ci`    | `eygcibr0` (10.197.0.0/24)      | host `10.197.0.1:8080` only                                    |
+| `agent` | `eygagentbr0` (10.196.0.0/24)   | host `10.196.0.1:8080` + Anthropic API (`160.79.104.0/23:443`) |
 
 The ACLs are on the bridges rather than the NICs because Incus 6.0 looks NIC
 ACLs up in the instance's project, where they don't exist. So whatever is
 plugged into a bridge gets that bridge's limits.
 
 Nothing else is reachable: no other host ports, LAN, Tailscale, internet, or
-other VMs. DNS resolves only `anthropic.com` names on `eygbr0` and nothing on
-`eygcibr0`. Spoofed source addresses are
-dropped. **Package registries are not reachable either**, so dependencies must
-be in the image or served via the coordinator.
+other VMs. DNS resolves only `anthropic.com` names on `eygagentbr0` and nothing
+on `eygcibr0`. Spoofed source addresses are dropped. **Package registries are
+not reachable either**, so dependencies must be in the image or served via the
+coordinator.
 
 Create or update the bridges and ACLs (in `default`) and the profiles (in the
 factory project) (safe to re-run after editing
-`configfiles/incus-eyg{,ci}br0-network.yaml`, `incus-acl-eyg-*.yaml` or
+`configfiles/incus-eyg{agent,ci}br0-network.yaml`, `incus-acl-eyg-*.yaml` or
 `incus-eyg-{agent,ci}-profile.yaml`):
 
 ```

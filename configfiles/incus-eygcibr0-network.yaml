@@ -1,6 +1,6 @@
-# Bridge for EYG factory CI VMs; agent VMs use eygbr0. The bridge carries the
-# eyg-ci ACL, so anything on it gets CI's limits (see
-# incus-eygbr0-network.yaml for why the ACLs aren't on the NICs).
+# Bridge for EYG factory CI VMs; agent VMs use eygagentbr0. The bridge
+# carries the eyg-ci ACL, so anything on it gets CI's limits (see
+# incus-eygagentbr0-network.yaml for why the ACLs aren't on the NICs).
 description: EYG factory CI VMs
 config:
   ipv4.address: 10.197.0.1/24

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Create or update the restricted networks used by EYG factory VMs: the
-# `eyg-agent` / `eyg-ci` ACLs, the `eygbr0` (agent) and `eygcibr0` (ci) bridges
-# that carry them, and the matching profiles.
+# `eyg-agent` / `eyg-ci` ACLs, the `eygagentbr0` (agent) and `eygcibr0` (ci)
+# bridges that carry them, and the matching profiles.
 # Safe to re-run after editing any of the config files.
 #
 # The bridges and ACLs go in the `default` project; the profiles go in the
@@ -26,9 +26,9 @@ ensure_project
 # ACLs first: the bridges reference them.
 apply default "network acl" eyg-ci configfiles/incus-acl-eyg-ci.yaml
 apply default "network acl" eyg-agent configfiles/incus-acl-eyg-agent.yaml
-apply default network eygbr0 configfiles/incus-eygbr0-network.yaml
+apply default network eygagentbr0 configfiles/incus-eygagentbr0-network.yaml
 apply default network eygcibr0 configfiles/incus-eygcibr0-network.yaml
 apply "$PROJECT" profile eyg-ci configfiles/incus-eyg-ci-profile.yaml
 apply "$PROJECT" profile eyg-agent configfiles/incus-eyg-agent-profile.yaml
 
-echo "Networks eygbr0 / eygcibr0, ACLs and profiles eyg-ci / eyg-agent ($PROJECT) are up to date."
+echo "Networks eygagentbr0 / eygcibr0, ACLs and profiles eyg-ci / eyg-agent ($PROJECT) are up to date."

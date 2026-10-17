@@ -25,7 +25,7 @@ pincus launch eyg-golden "$NAME" --vm -p default -p eyg-golden -p "eyg-$MODE" < 
 # The bridge's ACL is what restricts the VM, so check both that eth0 is on the
 # mode's bridge and that the bridge carries the mode's ACL. `incus config device
 # get` doesn't see profile devices, so check the expanded ones.
-case "$MODE" in agent) BRIDGE=eygbr0 ;; ci) BRIDGE=eygcibr0 ;; esac
+case "$MODE" in agent) BRIDGE=eygagentbr0 ;; ci) BRIDGE=eygcibr0 ;; esac
 incus query "/1.0/instances/$NAME?project=$PROJECT" | python3 -c '
 import json, sys
 bridge = sys.argv[1]
