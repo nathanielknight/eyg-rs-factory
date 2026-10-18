@@ -74,8 +74,11 @@ ACLs up in the instance's project, where they don't exist. So whatever is
 plugged into a bridge gets that bridge's limits.
 
 Nothing else is reachable: no other host ports, LAN, Tailscale, internet, or
-other VMs. DNS resolves only `anthropic.com` names on `eygagentbr0` and nothing
-on `eygcibr0`. Spoofed source addresses are dropped. **Package registries are
+other VMs. The bridges' own DNS resolves only `anthropic.com` names on
+`eygagentbr0` and nothing on `eygcibr0`, but Incus lets VMs reach port 53 on
+any host address, so other resolvers on the host (e.g. `incusbr0`'s) answer
+them. DNS tunnelling is outside the threat model. Spoofed source addresses are
+dropped. **Package registries are
 not reachable either**, so dependencies must be in the image or served via the
 coordinator.
 
@@ -98,6 +101,13 @@ bridge carries the mode's ACL, and deletes the VM if not:
 ```
 ./scripts/launch-vm.sh agent run-1
 ./scripts/launch-vm.sh ci ci-1
+```
+
+To check the restrictions actually hold, launch a VM per mode and probe from
+inside it (exits non-zero on any mismatch):
+
+```
+./scripts/check-network.py
 ```
 
 Run commands as the agent user. Pass Claude credentials per run; never bake
