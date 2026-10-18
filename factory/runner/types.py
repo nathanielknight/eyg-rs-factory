@@ -105,6 +105,10 @@ class RunSpec:
             )
         if any(o.max_bytes < 0 for o in self.outputs):
             raise ValueError("output max_bytes must be non-negative")
+        # Results are keyed by guest path, so a duplicate would vanish.
+        paths = [o.guest_path for o in self.outputs]
+        if len(set(paths)) != len(paths):
+            raise ValueError(f"duplicate output guest paths in {paths}")
 
 
 @dataclass(frozen=True)
@@ -136,8 +140,18 @@ class RunStatus:
     ended_at: datetime | None
 
 
+class RunInProgress(Exception):
+    """Another worker holds this run.
+
+    run() claims a live run with a lease that its worker renews as it goes. A
+    second run() is refused until the first finishes or its lease lapses (it
+    crashed), and then takes over.
+    """
+
+
 class Runner(Protocol):
     def create(self, spec: RunSpec) -> RunId: ...  # records the invocation as pending
-    def run(self, run_id: RunId) -> RunResult: ...  # blocking, re-entrant
+    # Blocking, re-entrant; raises RunInProgress if another worker holds it.
+    def run(self, run_id: RunId) -> RunResult: ...
     def cancel(self, run_id: RunId) -> None: ...  # force-stops the instance
     def status(self, run_id: RunId) -> RunStatus: ...  # current status and timestamps

@@ -1,13 +1,31 @@
 import hashlib
+import itertools
 import shutil
 import tempfile
+from datetime import timedelta
 from pathlib import Path
+from unittest import mock
 
+from django.db import IntegrityError
 from django.test import TestCase
 
 from runner.models import Invocation
-from runner.runner import IncusRunner, instance_name, new_run_id
-from runner.types import ImageSource, Input, Output, RunSpec, SnapshotSource
+from runner.runner import (
+    EXIT_FILE,
+    WRAPPER,
+    ClaimLost,
+    IncusRunner,
+    instance_name,
+    new_run_id,
+)
+from runner.types import (
+    ImageSource,
+    Input,
+    Output,
+    RunInProgress,
+    RunSpec,
+    SnapshotSource,
+)
 
 from .fake import Clock, Command, FakeIncus
 
@@ -96,10 +114,29 @@ class LifecycleTests(RunnerTestCase):
         self.assertIsNotNone(result.command_started_at)
         self.assertIsNotNone(result.ended_at)
 
-        # Command ran as the requested user; input pushed with ownership, then
-        # unpacked as root; the instance is gone.
+        # Command ran wrapped, as the requested user, with a state dir it owns;
+        # input pushed with ownership, then unpacked as root; the instance is
+        # gone.
         self.assertIn(
-            ("exec", result.instance_name, ("make", "test"), 1001, 1001, "/home/ci"),
+            (
+                "exec",
+                result.instance_name,
+                (*WRAPPER, "make", "test"),
+                1001,
+                1001,
+                "/home/ci",
+            ),
+            self.incus.calls,
+        )
+        self.assertIn(
+            (
+                "exec",
+                result.instance_name,
+                ("install", "-d", "-o", "1001", "-g", "1001", "/run/eyg-runner"),
+                0,
+                0,
+                "/",
+            ),
             self.incus.calls,
         )
         self.assertIn(
@@ -249,15 +286,12 @@ class FailureTests(RunnerTestCase):
 
 
 class RecoveryTests(RunnerTestCase):
-    def test_reattaches_to_running_command(self):
-        """A crash after exec leaves a running row; run() waits on the stored op."""
-        self.incus.command = Command(
-            exit_code=7, stdout=b"done", files={"/home/ci/out/results.json": b"{}"}
-        )
-        run_id = self.runner.create(self.spec())
+    def crashed_while_running(self, **spec) -> tuple[str, str, str]:
+        "A row left running by a worker that died after starting the command."
+        run_id = self.runner.create(self.spec(**spec))
         name = instance_name(run_id)
         self.incus.create_instance(name, None, [])
-        op_id = self.incus.exec(name, ["make", "test"])
+        op_id = self.incus.exec(name, [*WRAPPER, "make", "test"])
         Invocation.objects.filter(pk=run_id).update(
             status="running",
             instance_name=name,
@@ -265,6 +299,14 @@ class RecoveryTests(RunnerTestCase):
             started_at=self.clock.now(),
             command_started_at=self.clock.now(),
         )
+        return run_id, name, op_id
+
+    def test_reattaches_to_running_command(self):
+        """A crash after exec leaves a running row; run() waits on the stored op."""
+        self.incus.command = Command(
+            exit_code=7, stdout=b"done", files={"/home/ci/out/results.json": b"{}"}
+        )
+        run_id, _, _ = self.crashed_while_running()
         result = self.runner.run(run_id)
         self.assertEqual((result.status, result.exit_code), ("completed", 7))
         self.assertEqual(result.stdout_path.read_bytes(), b"done")
@@ -272,20 +314,57 @@ class RecoveryTests(RunnerTestCase):
 
     def test_reattach_after_deadline_is_timeout(self):
         self.incus.command = Command(hang=True)
-        run_id = self.runner.create(self.spec(timeout_s=60))
-        name = instance_name(run_id)
-        self.incus.create_instance(name, None, [])
-        op_id = self.incus.exec(name, ["make", "test"])
-        Invocation.objects.filter(pk=run_id).update(
-            status="running",
-            instance_name=name,
-            operation_id=op_id,
-            started_at=self.clock.now(),
-            command_started_at=self.clock.now(),
-        )
+        run_id, _, _ = self.crashed_while_running(timeout_s=60)
         self.clock.sleep(3600)
         result = self.runner.run(run_id)
         self.assertEqual(result.status, "timeout")
+
+    def test_forgotten_op_resumes_from_exit_file(self):
+        """Incus dropped the finished op; the wrapper's exit file has the code."""
+        self.incus.command = Command(
+            exit_code=7, stdout=b"done", files={"/home/ci/out/results.json": b"{}"}
+        )
+        run_id, _, op_id = self.crashed_while_running()
+        self.incus.forget(op_id)
+        result = self.runner.run(run_id)
+        self.assertEqual((result.status, result.exit_code), ("completed", 7))
+        self.assertEqual(result.stdout_path.read_bytes(), b"done")  # found by op ID
+        self.assertIn("/home/ci/out/results.json", result.artifacts)
+        self.assertFalse((self.tmp / "runs" / run_id / "incus-op.json").exists())
+        self.assertEqual(self.incus.instances, {})
+
+    def test_forgotten_op_follows_live_command_until_it_exits(self):
+        self.incus.command = Command(hang=True, stdout=b"partial")
+        run_id, name, op_id = self.crashed_while_running(outputs=[])
+        self.incus.forget(op_id)
+
+        def sleep(s):
+            self.clock.sleep(s)
+            self.incus.finish_hung_command(name, 4)
+
+        self.runner.sleep = sleep
+        result = self.runner.run(run_id)
+        self.assertEqual((result.status, result.exit_code), ("completed", 4))
+        self.assertEqual(result.stdout_path.read_bytes(), b"partial")
+
+    def test_forgotten_op_with_live_command_times_out_at_deadline(self):
+        self.incus.command = Command(hang=True, stdout=b"partial")
+        run_id, name, op_id = self.crashed_while_running(timeout_s=60)
+        self.incus.forget(op_id)
+        result = self.runner.run(run_id)
+        self.assertEqual(result.status, "timeout")
+        self.assertEqual(result.stdout_path.read_bytes(), b"partial")
+        self.assertIn(("stop", name), self.incus.calls)
+
+    def test_forgotten_op_with_no_process_or_exit_code_is_infra_error(self):
+        self.incus.command = Command(hang=True)
+        run_id, name, op_id = self.crashed_while_running()
+        self.incus.forget(op_id)
+        self.incus.instances[name]["command_running"] = False  # e.g. guest rebooted
+        result = self.runner.run(run_id)
+        self.assertEqual(result.status, "infra_error")
+        self.assertIn("left no exit code", result.error)
+        self.assertNotIn(EXIT_FILE, self.incus.instances.get(name, {}).get("files", {}))
 
     def test_pending_with_leftover_instance_starts_over(self):
         run_id = self.runner.create(self.spec(outputs=[]))
@@ -295,6 +374,118 @@ class RecoveryTests(RunnerTestCase):
         result = self.runner.run(run_id)
         self.assertEqual(result.status, "completed")
         self.assertIn(("delete", name), self.incus.calls)
+
+
+class ClaimTests(RunnerTestCase):
+    def claim(self, run_id, token="other", age_s=0):
+        Invocation.objects.filter(pk=run_id).update(
+            claim_token=token,
+            heartbeat_at=self.clock.now() - timedelta(seconds=age_s),
+        )
+
+    def test_second_worker_is_refused_while_claim_is_fresh(self):
+        run_id = self.runner.create(self.spec())
+        self.claim(run_id, age_s=60)
+        with self.assertRaises(RunInProgress):
+            self.runner.run(run_id)
+        self.assertEqual(self.incus.calls, [])
+        self.assertEqual(self.runner.status(run_id).status, "pending")
+
+    def test_lapsed_claim_is_taken_over(self):
+        self.incus.command = Command(files={"/home/ci/out/results.json": b"{}"})
+        run_id = self.runner.create(self.spec())
+        self.claim(run_id, age_s=901)
+        self.assertEqual(self.runner.run(run_id).status, "completed")
+
+    def test_finished_run_returns_result_whatever_the_claim(self):
+        run_id, first = self.go(outputs=[])
+        self.claim(run_id)
+        self.assertEqual(self.runner.run(run_id), first)
+
+    def test_heartbeat_is_renewed_while_waiting(self):
+        self.incus.command = Command(hang=True)
+        run_id = self.runner.create(self.spec(timeout_s=3600, outputs=[]))
+        beats = []
+        wait = self.incus.wait
+
+        def wait_and_watch(op_id, timeout_s):
+            beats.append(Invocation.objects.get(pk=run_id).heartbeat_at)
+            return wait(op_id, timeout_s)
+
+        self.incus.wait = wait_and_watch
+        self.runner.run(run_id)
+        # Never more than one wait chunk between heartbeats.
+        gaps = [(b - a).total_seconds() for a, b in itertools.pairwise(beats)]
+        self.assertTrue(gaps)
+        self.assertLessEqual(max(gaps), 60)
+
+    def test_claim_lost_mid_run_leaves_run_and_instance_alone(self):
+        self.incus.command = Command(hang=True)
+        run_id = self.runner.create(self.spec())
+        wait = self.incus.wait
+
+        def wait_then_steal(op_id, timeout_s):
+            if Invocation.objects.get(pk=run_id).status == "running":
+                self.claim(run_id, token="thief")
+            return wait(op_id, timeout_s)
+
+        self.incus.wait = wait_then_steal
+        with self.assertRaises(ClaimLost):
+            self.runner.run(run_id)
+        inv = Invocation.objects.get(pk=run_id)
+        self.assertEqual((inv.status, inv.claim_token), ("running", "thief"))
+        self.assertEqual(self.incus.instances[inv.instance_name]["status"], "Running")
+
+    def test_lease_must_outlast_the_longest_wait(self):
+        with self.assertRaises(ValueError):
+            IncusRunner(self.incus, self.tmp, step_timeout_s=300, lease_s=300)
+
+
+class FinaliseTests(RunnerTestCase):
+    def test_finalise_failure_still_ends_the_run(self):
+        self.incus.command = Command(files={"/home/ci/out/results.json": b"{}"})
+        with mock.patch.object(Path, "write_text", side_effect=OSError("disk full")):
+            _, result = self.go()
+        self.assertEqual(result.status, "infra_error")
+        self.assertIn("finalising: OSError: disk full", result.error)
+        self.assertIsNotNone(result.ended_at)
+        self.assertEqual(self.incus.instances, {})
+
+    def test_row_left_live_by_a_failed_finalise_is_reaped_by_sweep(self):
+        self.incus.command = Command(files={"/home/ci/out/results.json": b"{}"})
+        run_id = self.runner.create(self.spec())
+        with (
+            mock.patch.object(Path, "write_text", side_effect=OSError("disk full")),
+            mock.patch.object(
+                Invocation.objects, "filter", side_effect=self.failing_terminal_write
+            ),
+            self.assertRaises(IntegrityError),
+        ):
+            self.runner.run(run_id)
+        self.assertEqual(self.runner.status(run_id).status, "running")
+        self.assertEqual(self.incus.instances, {})  # torn down anyway
+
+        self.clock.sleep(901)
+        self.runner.sweep()
+        inv = Invocation.objects.get(pk=run_id)
+        self.assertEqual(inv.status, "infra_error")
+        self.assertIn("abandoned", inv.error)
+
+    def failing_terminal_write(self, *args, **kwargs):
+        "Invocation.objects.filter, but writing a terminal status fails."
+        qs = Invocation.objects.all().filter(*args, **kwargs)
+        update = qs.update
+
+        def guarded(**fields):
+            if fields.get("status") == "infra_error":
+                raise IntegrityError("database is gone")
+            return update(**fields)
+
+        qs.update = guarded
+        qs.filter = lambda *a, **k: self.failing_terminal_write(
+            *args, *a, **kwargs, **k
+        )
+        return qs
 
 
 class CancelAndSweepTests(RunnerTestCase):
@@ -351,6 +542,40 @@ class CancelAndSweepTests(RunnerTestCase):
             {instance_name(live), instance_name(kept), "eyg-golden"},
         )
 
+    def abandoned(self, age_s, **spec):
+        "A running row whose worker last renewed its claim age_s ago."
+        run_id = self.runner.create(self.spec(**spec))
+        name = instance_name(run_id)
+        self.incus.create_instance(name, None, [])
+        Invocation.objects.filter(pk=run_id).update(
+            status="running",
+            instance_name=name,
+            claim_token="gone",
+            heartbeat_at=self.clock.now() - timedelta(seconds=age_s),
+        )
+        return run_id, name
+
+    def test_sweep_reaps_abandoned_runs(self):
+        stale, stale_name = self.abandoned(age_s=901)
+        fresh, fresh_name = self.abandoned(age_s=60)
+        queued = self.runner.create(self.spec())  # never started: not abandoned
+
+        swept = self.runner.sweep()
+
+        self.assertEqual(swept, [stale_name])
+        inv = Invocation.objects.get(pk=stale)
+        self.assertEqual(inv.status, "infra_error")
+        self.assertIn("abandoned: no heartbeat", inv.error)
+        self.assertIsNotNone(inv.ended_at)
+        self.assertEqual(set(self.incus.instances), {fresh_name})
+        self.assertEqual(self.runner.status(fresh).status, "running")
+        self.assertEqual(self.runner.status(queued).status, "pending")
+
+    def test_sweep_stops_but_keeps_abandoned_keep_on_failure_instance(self):
+        _, name = self.abandoned(age_s=901, keep_on_failure=True)
+        self.runner.sweep()
+        self.assertEqual(self.incus.instances[name]["status"], "Stopped")
+
 
 class SpecValidationTests(RunnerTestCase):
     def test_relative_guest_paths_rejected(self):
@@ -358,6 +583,20 @@ class SpecValidationTests(RunnerTestCase):
             self.spec(cwd="work")
         with self.assertRaises(ValueError):
             self.spec(outputs=[Output("out.json", 10)])
+
+    def test_duplicate_outputs_rejected(self):
+        with self.assertRaises(ValueError):
+            self.spec(outputs=[Output("/out/a", 10), Output("/out/a", 20)])
+
+    def test_failed_insert_leaves_no_run_dir(self):
+        with (
+            mock.patch.object(
+                Invocation.objects, "create", side_effect=IntegrityError("locked")
+            ),
+            self.assertRaises(IntegrityError),
+        ):
+            self.runner.create(self.spec())
+        self.assertEqual(list((self.tmp / "runs").iterdir()), [])
 
     def test_missing_input_file_rejected_at_create(self):
         with self.assertRaises(FileNotFoundError):

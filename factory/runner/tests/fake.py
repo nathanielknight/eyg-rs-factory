@@ -5,7 +5,8 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from runner.incus import IncusError, Operation, OutputRejected
+from runner.incus import IncusError, NotFound, Operation, OutputRejected
+from runner.runner import EXIT_FILE, PID_FILE, STATE_DIR, WRAPPER
 
 
 @dataclass
@@ -65,7 +66,7 @@ class FakeIncus:
 
     def _operation(self, op_id) -> Operation:
         if op_id not in self.ops:
-            raise IncusError(f"operation {op_id} not found")
+            raise NotFound(f"operation {op_id} not found")
         d = self.ops[op_id]
         return Operation.from_json({k: v for k, v in d.items() if k != "instance"})
 
@@ -76,6 +77,16 @@ class FakeIncus:
         if inst["status"] != "Running":
             raise IncusError(f"instance {name} is not running")
         return inst
+
+    def forget(self, op_id) -> None:
+        "Drop an operation, as Incus does 5s after it finishes or on restart."
+        del self.ops[op_id]
+
+    def finish_hung_command(self, name, exit_code) -> None:
+        "A hung command exits on its own, after its operation was forgotten."
+        inst = self.instances[name]
+        inst["command_running"] = False
+        inst["files"][EXIT_FILE] = (f"{exit_code}\n".encode(), "file")
 
     # -- IncusClient surface -----------------------------------------------
 
@@ -90,14 +101,15 @@ class FakeIncus:
             "config": {"volatile.base_image": "abc123"},
             "files": {},
             "profiles": profiles,
+            "command_running": False,
         }
         return self._op()
 
     def get_instance(self, name):
         return {"name": name, **self.instances[name]}
 
-    def list_instances(self):
-        return [{"name": n, "status": i["status"]} for n, i in self.instances.items()]
+    def list_instance_names(self):
+        return list(self.instances)
 
     def get_operation(self, op_id):
         return self._operation(op_id)
@@ -124,10 +136,17 @@ class FakeIncus:
             return self._op(metadata={"return": 0})
         if argv[0] == "tar":
             return self._op(metadata={"return": 0})
+        if argv[0] == "install" and argv[-1] == STATE_DIR:
+            return self._op(metadata={"return": 0})
+        if argv == ["sh", "-c", f'kill -0 "$(cat {PID_FILE})"']:
+            return self._op(metadata={"return": 0 if inst["command_running"] else 1})
+        assert argv[: len(WRAPPER)] == WRAPPER, f"unwrapped command {argv}"
+        inst["files"][PID_FILE] = (b"42\n", "file")
         c = self.command
         if c.hang:
             # Partial output is recorded; the metadata only says where once
             # the op finishes (when stop() kills it).
+            inst["command_running"] = True
             op_id = self._op(running=True, instance=name)
             prefix = f"/1.0/instances/{name}/logs/exec-output/exec_{op_id}"
             self.logs[prefix + ".stdout"], self.logs[prefix + ".stderr"] = (
@@ -138,6 +157,8 @@ class FakeIncus:
         if c.vm_dies:
             inst["status"] = "Stopped"
         inst["files"].update({p: (b, "file") for p, b in c.files.items()})
+        if not c.vm_dies:
+            inst["files"][EXIT_FILE] = (f"{c.exit_code}\n".encode(), "file")
         op_id = f"op{next(self.ids)}"
         out = f"/1.0/instances/{name}/logs/exec-output/exec_{op_id}.stdout"
         err = f"/1.0/instances/{name}/logs/exec-output/exec_{op_id}.stderr"
@@ -191,6 +212,7 @@ class FakeIncus:
         if inst["status"] == "Stopped":
             return self._op(status_code=400, err="The instance is already stopped")
         inst["status"] = "Stopped"
+        inst["command_running"] = False
         # Like Incus 6.0: a killed command's op succeeds, returning -1.
         for op_id, op in self.ops.items():
             if op["instance"] == name and op["status_code"] == 103:

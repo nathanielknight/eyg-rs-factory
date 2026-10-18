@@ -65,6 +65,8 @@ RUNNER_INCUS_PROJECT = os.environ.get("RUNNER_INCUS_PROJECT", "factory")
 RUNNER_RUN_ROOT = Path(os.environ.get("RUNNER_RUN_ROOT", BASE_DIR / "runs"))
 RUNNER_BOOT_TIMEOUT_S = 120
 RUNNER_HTTP_TIMEOUT_S = 30
+# A run whose worker hasn't renewed its claim for this long is abandoned.
+RUNNER_LEASE_S = 900
 
 ROOT_URLCONF = "factory.urls"
 

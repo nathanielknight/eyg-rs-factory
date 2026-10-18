@@ -63,6 +63,11 @@ class Invocation(models.Model):
     exit_code = models.IntegerField(null=True, blank=True)
     error = models.TextField(blank=True, default="")
 
+    # Claim: the worker driving a live run, and when it last showed signs of
+    # life. A lapsed heartbeat lets another run() take over, or sweep reap it.
+    claim_token = models.CharField(max_length=32, blank=True, default="")
+    heartbeat_at = models.DateTimeField(null=True, blank=True)
+
     # Incus
     operation_id = models.CharField(max_length=64, blank=True, default="")
     instance_name = models.CharField(max_length=64, blank=True, default="")

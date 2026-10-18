@@ -6,7 +6,7 @@ from pathlib import Path
 import httpx
 from django.test import SimpleTestCase
 
-from runner.incus import IncusClient, IncusError, OutputRejected
+from runner.incus import IncusClient, IncusError, NotFound, OutputRejected
 from runner.types import ImageSource, SnapshotSource
 
 
@@ -117,8 +117,22 @@ class RequestShapeTests(ClientTestCase):
             404,
             json={"type": "error", "error": "Instance not found", "error_code": 404},
         )
-        with self.assertRaisesRegex(IncusError, "Instance not found"):
+        with self.assertRaisesRegex(NotFound, "Instance not found"):
             self.client.get_instance("nope")
+
+    def test_list_instance_names(self):
+        self.handler = lambda r: httpx.Response(
+            200,
+            json={
+                "type": "sync",
+                "metadata": [
+                    "/1.0/instances/run-1?project=factory",
+                    "/1.0/instances/eyg-golden",
+                ],
+            },
+        )
+        self.assertEqual(self.client.list_instance_names(), ["run-1", "eyg-golden"])
+        self.assertNotIn("recursion", self.requests[0].url.params)
 
     def test_transport_error_raises_incus_error(self):
         def boom(r):
@@ -126,7 +140,7 @@ class RequestShapeTests(ClientTestCase):
 
         self.handler = boom
         with self.assertRaises(IncusError):
-            self.client.list_instances()
+            self.client.list_instance_names()
 
 
 class WaitTests(ClientTestCase):
@@ -138,6 +152,20 @@ class WaitTests(ClientTestCase):
         self.assertTrue(op.succeeded)
         self.assertEqual(op.metadata["return"], 2)
         self.assertEqual(self.requests[0].url.params["timeout"], "30")
+
+    def test_wait_rounds_fractions_up(self):
+        self.handler = lambda r: httpx.Response(
+            200, json={"type": "sync", "metadata": op_body(status_code=103)}
+        )
+        self.client.wait("op1", 0.4)
+        self.assertEqual(self.requests[0].url.params["timeout"], "1")
+
+    def test_wait_on_forgotten_operation_raises_not_found(self):
+        self.handler = lambda r: httpx.Response(
+            404, json={"type": "error", "error": "Operation not found"}
+        )
+        with self.assertRaises(NotFound):
+            self.client.wait("op1", 5)
 
     def test_wait_error_falls_back_to_get(self):
         def handler(r):

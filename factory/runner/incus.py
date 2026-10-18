@@ -8,6 +8,7 @@ waiting on its operation ID.
 
 import hashlib
 import json
+import math
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
@@ -36,6 +37,15 @@ CHUNK = 64 * 1024
 
 class IncusError(Exception):
     "The Incus API refused a request, failed an operation, or was unreachable."
+
+
+class NotFound(IncusError):
+    """The object doesn't exist (HTTP 404).
+
+    For an operation this usually means it finished: Incus forgets finished
+    operations 5s after they end (measured on 6.0.4), and all of them when the
+    daemon restarts.
+    """
 
 
 class OutputRejected(Exception):
@@ -129,7 +139,8 @@ class IncusClient:
         except ValueError:
             raise IncusError(f"{method} {path}: HTTP {resp.status_code}, non-JSON body")
         if body.get("type") == "error" or resp.status_code >= 400:
-            raise IncusError(
+            error = NotFound if resp.status_code == 404 else IncusError
+            raise error(
                 f"{method} {path}: {body.get('error') or f'HTTP {resp.status_code}'}"
             )
         return body
@@ -153,9 +164,12 @@ class IncusClient:
     def wait(self, op_id: str, timeout_s: float) -> Operation:
         """Wait up to `timeout_s` for an operation; return it, finished or not.
 
-        Raises IncusError only if the operation can't be read at all.
+        Raises IncusError only if the operation can't be read at all, and
+        NotFound if Incus has forgotten it.
         """
-        timeout_s = max(0, int(timeout_s))
+        # Round up: Incus takes whole seconds, and truncating a fraction to 0
+        # would make a caller's wait-until-deadline loop spin.
+        timeout_s = max(0, math.ceil(timeout_s))
         try:
             body = self._json(
                 "GET",
@@ -197,8 +211,9 @@ class IncusClient:
     def get_instance(self, name: str) -> dict:
         return self._json("GET", f"/1.0/instances/{name}")["metadata"]
 
-    def list_instances(self) -> list[dict]:
-        return self._json("GET", "/1.0/instances", params={"recursion": 1})["metadata"]
+    def list_instance_names(self) -> list[str]:
+        urls = self._json("GET", "/1.0/instances")["metadata"]
+        return [httpx.URL(url).path.rsplit("/", 1)[-1] for url in urls]
 
     def stop(self, name: str, force: bool = True) -> str:
         return self._async(

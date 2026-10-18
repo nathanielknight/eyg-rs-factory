@@ -4,6 +4,17 @@ Every run gets a throwaway VM named run-<run_id>. Writes are ordered so a
 crash at any point can be recovered from the stored row: the row exists before
 any Incus call, the instance name before the instance, the operation ID before
 the wait, and the terminal status last.
+
+A live run is driven by one worker at a time. run() claims the row with a
+random token and renews a heartbeat as it goes; a second run() is refused
+while the heartbeat is fresh. Once it lapses (the worker crashed), run() can
+take over where the row left off, or sweep() can reap the run.
+
+Incus forgets a finished operation 5s after it ends, and every operation when
+the daemon restarts, so a worker resuming a running command usually can't
+read its result from the operation. The command therefore runs under a small
+wrapper that records its PID and exit code in the guest, and resuming reads
+those instead.
 """
 
 import hashlib
@@ -11,12 +22,15 @@ import json
 import logging
 import posixpath
 import secrets
+import shutil
 import time
 from collections.abc import Callable, Iterator
+from dataclasses import asdict
 from datetime import datetime, timedelta
 from pathlib import Path
 
 from django.conf import settings
+from django.db.models import Q
 from django.utils import timezone
 
 from .incus import (
@@ -26,16 +40,32 @@ from .incus import (
     KILLED_RETURN_CODE,
     IncusClient,
     IncusError,
+    NotFound,
     Operation,
     OutputRejected,
 )
 from .models import LIVE_STATUSES, Invocation
 from .models import InvocationStatus as S
-from .types import RunId, RunResult, RunSpec, RunStatus, source_from_json
+from .types import RunId, RunInProgress, RunResult, RunSpec, RunStatus, source_from_json
 
 log = logging.getLogger(__name__)
 
 INSTANCE_PREFIX = "run-"
+
+# Guest-side state for the main command. /run is a tmpfs, so a rebooted guest
+# has neither file, which resuming treats as the command being lost.
+STATE_DIR = "/run/eyg-runner"
+PID_FILE = f"{STATE_DIR}/pid"
+EXIT_FILE = f"{STATE_DIR}/exit"
+# sh -c SCRIPT NAME ARGV...: "$@" runs ARGV exactly as exec would. A command
+# killed by a signal exits 128+n through the wrapper, so -1 now only means the
+# wrapper itself died (the instance stopping, say).
+WRAPPER = [
+    "sh",
+    "-c",
+    f'echo $$ > {PID_FILE}; "$@"; rc=$?; echo $rc > {EXIT_FILE}; exit $rc',
+    "eyg-runner",
+]
 
 
 def new_run_id() -> RunId:
@@ -56,6 +86,13 @@ class Cancelled(Exception):
     "The run was cancelled while run() was working on it."
 
 
+class ClaimLost(Exception):
+    """Another worker took this run over after our heartbeat lapsed.
+
+    The run, and its instance, are theirs now: stop without touching either.
+    """
+
+
 class IncusRunner:
     def __init__(
         self,
@@ -65,15 +102,25 @@ class IncusRunner:
         boot_timeout_s: float = 120,
         boot_poll_s: float = 2,
         step_timeout_s: float = 300,
+        lease_s: float = 900,
+        wait_chunk_s: float = 60,
+        resume_poll_s: float = 10,
         now: Callable[[], datetime] = timezone.now,
         sleep: Callable[[float], None] = time.sleep,
         monotonic: Callable[[], float] = time.monotonic,
     ):
+        # The heartbeat is renewed between calls, so the lease must outlast
+        # the longest single one.
+        if lease_s < 2 * max(step_timeout_s, wait_chunk_s, resume_poll_s):
+            raise ValueError("lease_s must be at least twice any single wait")
         self.client = client
         self.run_root = Path(run_root)
         self.boot_timeout_s = boot_timeout_s
         self.boot_poll_s = boot_poll_s
         self.step_timeout_s = step_timeout_s  # launch, unpack, stop, delete
+        self.lease = timedelta(seconds=lease_s)
+        self.wait_chunk_s = wait_chunk_s  # longest wait on the command at once
+        self.resume_poll_s = resume_poll_s
         self.now = now
         self.sleep = sleep
         self.monotonic = monotonic
@@ -91,71 +138,51 @@ class IncusRunner:
         (run_dir / "artifacts").mkdir(parents=True)
         for stream in ("stdout", "stderr"):
             (run_dir / f"{stream}.log").touch()
-        Invocation.objects.create(
-            id=run_id,
-            name=spec.name,
-            source=spec.source.to_json(),
-            profiles=list(spec.profiles),
-            argv=list(spec.argv),
-            env=dict(spec.env),
-            uid=spec.uid,
-            gid=spec.gid,
-            cwd=spec.cwd,
-            timeout_s=spec.timeout_s,
-            max_log_bytes=spec.max_log_bytes,
-            keep_on_failure=spec.keep_on_failure,
-            stdout_path=str(run_dir / "stdout.log"),
-            stderr_path=str(run_dir / "stderr.log"),
-            inputs=[
-                {
-                    "host_path": str(i.host_path),
-                    "guest_path": i.guest_path,
-                    "mode": i.mode,
-                    "uid": i.uid,
-                    "gid": i.gid,
-                    "unpack": i.unpack,
-                }
-                for i in spec.inputs
-            ],
-            outputs=[
-                {
-                    "guest_path": o.guest_path,
-                    "max_bytes": o.max_bytes,
-                    "required": o.required,
-                }
-                for o in spec.outputs
-            ],
-        )
+        try:
+            Invocation.objects.create(
+                id=run_id,
+                name=spec.name,
+                source=spec.source.to_json(),
+                profiles=list(spec.profiles),
+                argv=list(spec.argv),
+                env=dict(spec.env),
+                uid=spec.uid,
+                gid=spec.gid,
+                cwd=spec.cwd,
+                timeout_s=spec.timeout_s,
+                max_log_bytes=spec.max_log_bytes,
+                keep_on_failure=spec.keep_on_failure,
+                stdout_path=str(run_dir / "stdout.log"),
+                stderr_path=str(run_dir / "stderr.log"),
+                inputs=[
+                    {**asdict(i), "host_path": str(i.host_path)} for i in spec.inputs
+                ],
+                outputs=[asdict(o) for o in spec.outputs],
+            )
+        except BaseException:
+            shutil.rmtree(run_dir, ignore_errors=True)
+            raise
         return run_id
 
     def run(self, run_id: RunId) -> RunResult:
         inv = Invocation.objects.get(pk=run_id)
-        if not inv.is_live:
+        if not inv.is_live or not self._claim(inv):
+            inv.refresh_from_db()
             return inv.to_result()
 
         outcome = _Outcome()
+        owned = True
         try:
             try:
-                if inv.status == S.PENDING:
-                    self._launch(inv)
-                    self._wait_for_agent(inv)
-                    self._push_inputs(inv)
-                    self._start_command(inv)
-                op = self._wait_command(inv, outcome)
-                outcome.op = op
-                self._collect_logs(inv, op, outcome)
-                if outcome.status == S.COMPLETED:
-                    self._pull_outputs(inv, outcome)
-            except Cancelled:
-                outcome.fail(S.CANCELLED, "cancelled")
-            except IncusError as e:
-                outcome.fail(S.INFRA_ERROR, str(e))
-            except Exception as e:
-                log.exception("run %s failed unexpectedly", run_id)
-                outcome.fail(S.INFRA_ERROR, f"internal error: {type(e).__name__}: {e}")
-            return self._finalise(inv, outcome)
+                self._drive(inv, outcome)
+                return self._finalise(inv, outcome)
+            except ClaimLost:
+                owned = False
+                log.warning("run %s: claim lost to another worker", run_id)
+                raise
         finally:
-            self._teardown(inv)
+            if owned:
+                self._teardown(inv)
 
     def cancel(self, run_id: RunId) -> None:
         updated = Invocation.objects.filter(pk=run_id, status__in=LIVE_STATUSES).update(
@@ -178,42 +205,129 @@ class IncusRunner:
         return Invocation.objects.get(pk=run_id).to_status()
 
     def sweep(self) -> list[str]:
-        """Delete run-* instances with no live run record. Returns their names.
+        """Reap abandoned runs and orphaned instances. Returns the instances.
 
-        Instances deliberately kept by keep_on_failure are left alone.
+        An abandoned run is a live one that has touched Incus but whose worker
+        stopped renewing its claim; it's marked infra_error and torn down like
+        any other failed run. An orphaned instance is a run-* instance with no
+        live run. Instances deliberately kept by keep_on_failure are left alone.
         """
         swept = []
-        for inst in self.client.list_instances():
-            name = inst["name"]
-            if not name.startswith(INSTANCE_PREFIX):
-                continue
-            inv = Invocation.objects.filter(
-                pk=name.removeprefix(INSTANCE_PREFIX)
-            ).first()
+        for inv in Invocation.objects.filter(self._claimable()).exclude(
+            instance_name=""
+        ):
+            if self._reap(inv):
+                swept.append(inv.instance_name)
+
+        names = [
+            n
+            for n in self.client.list_instance_names()
+            if n.startswith(INSTANCE_PREFIX)
+        ]
+        runs = Invocation.objects.in_bulk(
+            [n.removeprefix(INSTANCE_PREFIX) for n in names]
+        )
+        for name in names:
+            inv = runs.get(name.removeprefix(INSTANCE_PREFIX))
             if inv is not None and (inv.is_live or inv.instance_kept):
+                continue
+            if name in swept:
                 continue
             log.info("sweeping orphaned instance %s", name)
             self._destroy(name)
             swept.append(name)
         return swept
 
+    # -- claims ------------------------------------------------------------
+
+    def _claimable(self) -> Q:
+        "Live rows nobody holds: never claimed, or the heartbeat lapsed."
+        stale = self.now() - self.lease
+        return Q(status__in=LIVE_STATUSES) & (
+            Q(claim_token="") | Q(heartbeat_at__isnull=True) | Q(heartbeat_at__lt=stale)
+        )
+
+    def _claim(self, inv: Invocation) -> bool:
+        """Take the run for this worker. False if it's no longer live.
+
+        Raises RunInProgress if another worker holds it.
+        """
+        token = secrets.token_hex(16)
+        now = self.now()
+        if Invocation.objects.filter(self._claimable(), pk=inv.pk).update(
+            claim_token=token, heartbeat_at=now
+        ):
+            inv.refresh_from_db()
+            return True
+        if Invocation.objects.filter(pk=inv.pk, status__in=LIVE_STATUSES).exists():
+            raise RunInProgress(inv.pk)
+        return False
+
+    def _reap(self, inv: Invocation) -> bool:
+        "Mark an abandoned run infra_error and tear it down, if still abandoned."
+        since = inv.heartbeat_at.isoformat() if inv.heartbeat_at else "never"
+        if not Invocation.objects.filter(self._claimable(), pk=inv.pk).update(
+            claim_token=secrets.token_hex(16),
+            status=S.INFRA_ERROR,
+            exit_code=None,
+            error=f"abandoned: no heartbeat from its worker since {since}",
+            ended_at=self.now(),
+        ):
+            return False
+        log.info("reaping abandoned run %s", inv.pk)
+        self._teardown(inv)
+        return True
+
+    def _heartbeat(self, inv: Invocation) -> None:
+        if not Invocation.objects.filter(pk=inv.pk, claim_token=inv.claim_token).update(
+            heartbeat_at=self.now()
+        ):
+            raise ClaimLost()
+
+    def _checkpoint(self, inv: Invocation) -> None:
+        "Renew the claim; raise Cancelled if the run was cancelled."
+        self._heartbeat(inv)
+        if not Invocation.objects.filter(pk=inv.pk, status__in=LIVE_STATUSES).exists():
+            raise Cancelled()
+
+    def _save(self, inv: Invocation, **fields) -> None:
+        "Write fields to our live row; raise Cancelled or ClaimLost if it isn't."
+        for k, v in fields.items():
+            setattr(inv, k, v)
+        if Invocation.objects.filter(
+            pk=inv.pk, status__in=LIVE_STATUSES, claim_token=inv.claim_token
+        ).update(**fields, heartbeat_at=self.now()):
+            return
+        self._heartbeat(inv)  # raises ClaimLost if that's why
+        raise Cancelled()
+
     # -- lifecycle steps ---------------------------------------------------
 
     def run_dir(self, run_id: str) -> Path:
         return self.run_root / run_id
 
-    def _save(self, inv: Invocation, **fields) -> None:
-        "Write fields to a live row; raise Cancelled if it's no longer live."
-        for k, v in fields.items():
-            setattr(inv, k, v)
-        if not Invocation.objects.filter(pk=inv.pk, status__in=LIVE_STATUSES).update(
-            **fields
-        ):
-            raise Cancelled()
-
-    def _check_cancelled(self, inv: Invocation) -> None:
-        if not Invocation.objects.filter(pk=inv.pk, status__in=LIVE_STATUSES).exists():
-            raise Cancelled()
+    def _drive(self, inv: Invocation, outcome: "_Outcome") -> None:
+        "Take the run from wherever the row says it is to an outcome."
+        try:
+            if inv.status == S.PENDING:
+                self._launch(inv)
+                self._wait_for_agent(inv)
+                self._push_inputs(inv)
+                self._start_command(inv)
+            op = self._wait_command(inv, outcome)
+            outcome.op = op
+            self._collect_logs(inv, op, outcome)
+            if outcome.status == S.COMPLETED:
+                self._pull_outputs(inv, outcome)
+        except ClaimLost:
+            raise
+        except Cancelled:
+            outcome.fail(S.CANCELLED, "cancelled")
+        except IncusError as e:
+            outcome.fail(S.INFRA_ERROR, str(e))
+        except Exception as e:
+            log.exception("run %s failed unexpectedly", inv.pk)
+            outcome.fail(S.INFRA_ERROR, f"internal error: {type(e).__name__}: {e}")
 
     def _launch(self, inv: Invocation) -> None:
         name = instance_name(inv.id)
@@ -233,13 +347,17 @@ class IncusRunner:
         deadline = self.monotonic() + self.boot_timeout_s
         last_error = "no response"
         while True:
-            self._check_cancelled(inv)
+            self._checkpoint(inv)
             remaining = deadline - self.monotonic()
             if remaining <= 0:
                 raise IncusError(
                     f"guest agent not ready after {self.boot_timeout_s}s: {last_error}"
                 )
             try:
+                # Output stays recorded: without it Incus 6.0 reports -1 for
+                # anything not instant, so a slow `true` would look like a
+                # failure. Each probe leaves two small log files on the host,
+                # deleted with the instance.
                 op_id = self.client.exec(inv.instance_name, ["true"])
                 op = self.client.wait(op_id, min(remaining, 10))
                 if op.succeeded and op.metadata.get(EXEC_RETURN_KEY) == 0:
@@ -249,10 +367,21 @@ class IncusRunner:
                 last_error = str(e)
             self.sleep(self.boot_poll_s)
 
+    def _exec_ok(self, inv: Invocation, argv: list[str], what: str) -> None:
+        "Run a short root command in the guest; raise IncusError unless it exits 0."
+        # Recorded output isn't optional: without it, Incus 6.0 reports the
+        # return code of anything not instant as -1.
+        op = self.client.wait_ok(
+            self.client.exec(inv.instance_name, argv), self.step_timeout_s, what
+        )
+        code = op.metadata.get(EXEC_RETURN_KEY)
+        if code != 0:
+            raise IncusError(f"{what}: {argv[0]} exited {code}")
+
     def _push_inputs(self, inv: Invocation) -> None:
         records = [dict(r) for r in inv.inputs]
         for record in records:
-            self._check_cancelled(inv)
+            self._checkpoint(inv)
             self.client.push_file(
                 inv.instance_name,
                 record["guest_path"],
@@ -263,27 +392,24 @@ class IncusRunner:
             )
             if record["unpack"]:
                 # Ownership of the extracted files comes from the tarball.
-                # Recorded output isn't optional: without it, Incus 6.0
-                # reports tar's return code as -1.
                 guest_dir = posixpath.dirname(record["guest_path"])
-                op_id = self.client.exec(
-                    inv.instance_name,
+                self._exec_ok(
+                    inv,
                     ["tar", "-xf", record["guest_path"], "-C", guest_dir],
+                    f"unpack {record['guest_path']}",
                 )
-                op = self.client.wait_ok(
-                    op_id, self.step_timeout_s, f"unpack {record['guest_path']}"
-                )
-                if op.metadata.get(EXEC_RETURN_KEY) != 0:
-                    raise IncusError(
-                        f"unpack {record['guest_path']}: tar exited {op.metadata.get(EXEC_RETURN_KEY)}"
-                    )
         self._save(inv, inputs=records)
 
     def _start_command(self, inv: Invocation) -> None:
-        self._check_cancelled(inv)
+        self._checkpoint(inv)
+        self._exec_ok(
+            inv,
+            ["install", "-d", "-o", str(inv.uid), "-g", str(inv.gid), STATE_DIR],
+            "prepare runner state dir",
+        )
         op_id = self.client.exec(
             inv.instance_name,
-            inv.argv,
+            [*WRAPPER, *inv.argv],
             env=inv.env,
             uid=inv.uid,
             gid=inv.gid,
@@ -294,23 +420,31 @@ class IncusRunner:
             inv, operation_id=op_id, command_started_at=self.now(), status=S.RUNNING
         )
 
-    def _wait_command(self, inv: Invocation, outcome: "_Outcome") -> Operation:
-        """Wait for the command until its deadline (re-entrant after a crash)."""
+    def _wait_command(self, inv: Invocation, outcome: "_Outcome") -> Operation | None:
+        """Wait for the command until its deadline (re-entrant after a crash).
+
+        Returns the finished operation, or None if Incus had forgotten it and
+        the outcome came from the guest's own records instead.
+        """
         deadline = inv.command_started_at + timedelta(seconds=inv.timeout_s)
         while True:
+            self._heartbeat(inv)
             remaining = (deadline - self.now()).total_seconds()
-            op = self.client.wait(inv.operation_id, max(0, min(remaining, 300)))
+            try:
+                op = self.client.wait(
+                    inv.operation_id, max(0, min(remaining, self.wait_chunk_s))
+                )
+            except NotFound:
+                self._resume_from_guest(inv, outcome, deadline)
+                return None
             if op.finished or remaining <= 0:
                 break
         if not op.finished:
-            outcome.fail(S.TIMEOUT, f"command exceeded timeout_s={inv.timeout_s}")
+            self._time_out(inv, outcome)
             try:
-                self.client.wait_ok(
-                    self.client.stop(inv.instance_name), self.step_timeout_s, "stop"
-                )
                 op = self.client.get_operation(inv.operation_id)
-            except IncusError as e:
-                outcome.add_error(f"force-stop after timeout: {e}")
+            except IncusError:
+                pass  # forgotten already; the logs are found by op ID
             return op
         # A cancel() under us shows up below as a killed command; _finalise
         # keeps the cancelled status, and we still collect the partial logs.
@@ -327,8 +461,9 @@ class IncusRunner:
             return op
         if code == KILLED_RETURN_CODE:
             # Incus 6.0 reports both a signal death and the instance going
-            # away as a successful op returning -1. Only the first is the
-            # command's own doing.
+            # away as a successful op returning -1. Under the wrapper a signal
+            # to the command itself exits 128+n, so this is the wrapper dying;
+            # it's only the command's doing if the instance is still up.
             try:
                 state = self.client.get_instance(inv.instance_name).get("status")
             except IncusError as e:
@@ -341,12 +476,69 @@ class IncusRunner:
         outcome.status, outcome.exit_code = S.COMPLETED, code
         return op
 
-    def _collect_logs(
-        self, inv: Invocation, op: Operation, outcome: "_Outcome"
+    def _time_out(self, inv: Invocation, outcome: "_Outcome") -> None:
+        outcome.fail(S.TIMEOUT, f"command exceeded timeout_s={inv.timeout_s}")
+        try:
+            self.client.wait_ok(
+                self.client.stop(inv.instance_name), self.step_timeout_s, "stop"
+            )
+        except IncusError as e:
+            outcome.add_error(f"force-stop after timeout: {e}")
+
+    def _resume_from_guest(
+        self, inv: Invocation, outcome: "_Outcome", deadline: datetime
     ) -> None:
-        paths = (op.metadata or {}).get(EXEC_OUTPUT_KEY) or {}
+        "The command's operation is gone: follow it through the wrapper's files."
+        while True:
+            self._heartbeat(inv)
+            code = self._guest_exit_code(inv)
+            if code is not None:
+                outcome.status, outcome.exit_code = S.COMPLETED, code
+                return
+            if not self._guest_command_alive(inv):
+                # It may have exited between the two checks.
+                code = self._guest_exit_code(inv)
+                if code is not None:
+                    outcome.status, outcome.exit_code = S.COMPLETED, code
+                    return
+                outcome.fail(
+                    S.INFRA_ERROR,
+                    "command's operation was lost and it left no exit code",
+                )
+                return
+            remaining = (deadline - self.now()).total_seconds()
+            if remaining <= 0:
+                self._time_out(inv, outcome)
+                return
+            self.sleep(min(remaining, self.resume_poll_s))
+
+    def _guest_exit_code(self, inv: Invocation) -> int | None:
+        dest = self.run_dir(inv.id) / "exit-code"
+        try:
+            self.client.pull_file(inv.instance_name, EXIT_FILE, dest, 32)
+            return int(dest.read_text().strip())
+        except (OutputRejected, ValueError):
+            return None
+        finally:
+            dest.unlink(missing_ok=True)
+
+    def _guest_command_alive(self, inv: Invocation) -> bool:
+        op = self.client.wait_ok(
+            self.client.exec(
+                inv.instance_name, ["sh", "-c", f'kill -0 "$(cat {PID_FILE})"']
+            ),
+            self.step_timeout_s,
+            "check command",
+        )
+        return op.metadata.get(EXEC_RETURN_KEY) == 0
+
+    def _collect_logs(
+        self, inv: Invocation, op: Operation | None, outcome: "_Outcome"
+    ) -> None:
+        paths = dict(((op.metadata if op else None) or {}).get(EXEC_OUTPUT_KEY) or {})
         if not paths:
-            # Not finished cleanly (e.g. timeout): find the files by op ID.
+            # Not finished cleanly (a timeout, a forgotten op): find the files
+            # by op ID. They outlive the operation.
             try:
                 for p in self.client.list_exec_logs(inv.instance_name):
                     base = posixpath.basename(p.split("?", 1)[0])
@@ -379,7 +571,7 @@ class IncusRunner:
         for index, out in enumerate(inv.outputs):
             # Fixed host-side name; never the guest's.
             dest = artifacts / str(index)
-            record = {k: out[k] for k in ("guest_path", "max_bytes", "required")}
+            record = dict(out)
             try:
                 size, sha = self.client.pull_file(
                     inv.instance_name, out["guest_path"], dest, out["max_bytes"]
@@ -396,9 +588,29 @@ class IncusRunner:
             outcome.add_error("required outputs: " + "; ".join(problems))
 
     def _finalise(self, inv: Invocation, outcome: "_Outcome") -> RunResult:
-        run_dir = self.run_dir(inv.id)
+        try:
+            self._write_outcome(inv, outcome)
+        except ClaimLost:
+            raise
+        except Exception as e:
+            # Still end the run: a row left live after teardown would never
+            # finish. If even this fails, sweep() reaps it once the lease lapses.
+            log.exception("run %s: finalising failed", inv.pk)
+            outcome.fail(S.INFRA_ERROR, f"finalising: {type(e).__name__}: {e}")
+            Invocation.objects.filter(
+                pk=inv.pk, status__in=LIVE_STATUSES, claim_token=inv.claim_token
+            ).update(
+                status=outcome.status,
+                exit_code=None,
+                error=outcome.error,
+                ended_at=self.now(),
+            )
+        inv.refresh_from_db()
+        return inv.to_result()
+
+    def _write_outcome(self, inv: Invocation, outcome: "_Outcome") -> None:
         if outcome.op is not None:
-            (run_dir / "incus-op.json").write_text(
+            (self.run_dir(inv.id) / "incus-op.json").write_text(
                 json.dumps(outcome.op.raw, indent=2, default=str)
             )
         collected = dict(
@@ -414,12 +626,12 @@ class IncusRunner:
             error=outcome.error,
             ended_at=self.now(),
         )
-        rows = Invocation.objects.filter(pk=inv.pk)
-        if not rows.filter(status__in=LIVE_STATUSES).update(**collected, **terminal):
-            # Cancelled under us: keep cancel()'s status, add what we collected.
-            rows.update(**collected)
-        inv.refresh_from_db()
-        return inv.to_result()
+        ours = Invocation.objects.filter(pk=inv.pk, claim_token=inv.claim_token)
+        if ours.filter(status__in=LIVE_STATUSES).update(**collected, **terminal):
+            return
+        # Cancelled under us: keep cancel()'s status, add what we collected.
+        if not ours.update(**collected):
+            raise ClaimLost()
 
     def _teardown(self, inv: Invocation) -> None:
         inv.refresh_from_db()
@@ -491,4 +703,5 @@ def get_runner() -> IncusRunner:
         client,
         settings.RUNNER_RUN_ROOT,
         boot_timeout_s=settings.RUNNER_BOOT_TIMEOUT_S,
+        lease_s=settings.RUNNER_LEASE_S,
     )
