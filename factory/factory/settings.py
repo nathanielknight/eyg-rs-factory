@@ -40,6 +40,7 @@ INSTALLED_APPS = [
     "django.contrib.staticfiles",
     "ticket",
     "runner",
+    "workflow",
 ]
 
 MIDDLEWARE = [
@@ -50,10 +51,12 @@ MIDDLEWARE = [
     "django.contrib.auth.middleware.AuthenticationMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
-    "ticket.middleware.SharedSecretAuthMiddleware",
+    "ticket.middleware.AgentBridgeAuthMiddleware",
 ]
 
-# Shared secret for /tickets/ API; managed out-of-band via environment.
+# Shared secret for the agent bridge API (/tickets/, /submissions/), for Nat's
+# own tools; managed out-of-band via environment. Dev runs use their own
+# per-run tokens instead.
 FACTORY_SHARED_SECRET = os.environ.get("FACTORY_SHARED_SECRET", "")
 
 # Guest runner (see runner/). The Incus socket owns the host; only the factory
@@ -67,6 +70,77 @@ RUNNER_BOOT_TIMEOUT_S = 120
 RUNNER_HTTP_TIMEOUT_S = 30
 # A run whose worker hasn't renewed its claim for this long is abandoned.
 RUNNER_LEASE_S = 900
+
+# Development workflow (see workflow/).
+# The bare repo that main lives in; only the batch commands write to it.
+WORKFLOW_REPO = Path(os.environ.get("WORKFLOW_REPO", BASE_DIR / "repo.git"))
+WORKFLOW_MAIN_BRANCH = "main"
+# Staged VM inputs, uploaded bundles and lock files.
+WORKFLOW_ROOT = Path(os.environ.get("WORKFLOW_ROOT", BASE_DIR / "workflow-data"))
+# Requests from these networks are refused outright: CI VMs run submitted code
+# next to the holdout set, and must not be able to post anything back.
+WORKFLOW_UNTRUSTED_NETWORKS = ["10.197.0.0/24"]
+WORKFLOW_MAX_BUNDLE_BYTES = 64 * 1024 * 1024
+# Retry budgets, counted from a ticket's latest human note.
+WORKFLOW_MAX_ATTEMPTS = 3  # dev runs that ran to the end
+WORKFLOW_MAX_INFRA_ERRORS = 3  # consecutive errored dev or validation runs
+WORKFLOW_MAX_LIVE_DEV_RUNS = 1
+WORKFLOW_REVIEWERS = [
+    a for a in os.environ.get("WORKFLOW_REVIEWERS", "").split(",") if a
+]
+WORKFLOW_GIT_NAME = "EYG factory"
+WORKFLOW_GIT_EMAIL = "factory@localhost"
+# Git paths (PurePosixPath.full_match patterns) a submission may not touch,
+# and those that hold it for review.
+WORKFLOW_PROTECTED_PATHS = [
+    "rust-toolchain",
+    "rust-toolchain.toml",
+    ".cargo/**",
+    "deny.toml",
+    "clippy.toml",
+    ".clippy.toml",
+]
+WORKFLOW_REVIEW_TRIGGERS = ["**/Cargo.toml", "**/Cargo.lock", "**/build.rs"]
+
+# Dev runs: the golden image on the agent bridge.
+WORKFLOW_AGENT_SOURCE = {
+    "type": "image",
+    "fingerprint": os.environ.get("WORKFLOW_IMAGE_FINGERPRINT", ""),
+}
+WORKFLOW_AGENT_PROFILES = ["default", "eyg-golden", "eyg-agent"]
+WORKFLOW_AGENT_API_URL = "http://10.196.0.1:8080"
+WORKFLOW_CLAUDE_TOKEN = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN", "")
+WORKFLOW_DEV_TIMEOUT_S = 2 * 60 * 60
+WORKFLOW_DEV_MAX_LOG_BYTES = 512 * 1024 * 1024  # stdout is the transcript
+
+# Validation runs: the same image on the CI bridge.
+WORKFLOW_CI_SOURCE = WORKFLOW_AGENT_SOURCE
+WORKFLOW_CI_PROFILES = ["default", "eyg-golden", "eyg-ci"]
+WORKFLOW_CI_TIMEOUT_S = 60 * 60
+WORKFLOW_CI_MAX_LOG_BYTES = 16 * 1024 * 1024
+# Conformance checks are per ticket (Ticket.conformance_script). The holdout
+# set is global: suite files or directories of them, JSON lists of
+# {name, source, ...} cases as in scripts/verify.py. It lives outside the
+# interpreter repo and is only ever pushed into CI VMs.
+WORKFLOW_HOLDOUT_SUITES = [
+    Path(p) for p in os.environ.get("WORKFLOW_HOLDOUT_SUITES", "").split(":") if p
+]
+WORKFLOW_CI = {
+    "path": "/home/agent/.local/bin:/home/agent/.cargo/bin:/usr/local/bin:/usr/bin:/bin",
+    "build": ["cargo", "build", "--release", "--offline"],
+    "interpreter": ["./target/release/eyg"],
+    "oracle": ["eyg", "eval", "-"],
+    "lints": {
+        "clippy": [
+            "cargo", "clippy", "--offline", "--all-targets", "--", "-D", "warnings"
+        ],
+        "geiger": ["cargo", "geiger", "--offline", "--forbid-only"],
+        "deny": ["cargo", "deny", "check"],
+    },
+    "build_timeout_s": 20 * 60,
+    "case_timeout_s": 10,
+    "output_limit": 4000,
+}  # fmt: skip
 
 ROOT_URLCONF = "factory.urls"
 

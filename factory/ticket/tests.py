@@ -1,7 +1,21 @@
-from django.test import TestCase
+from django.test import Client, TestCase, override_settings
 from django.urls import reverse
 
 from .models import Ticket, TicketNote, TicketState
+
+SECRET = "test-secret"
+
+
+class OperatorClient(Client):
+    "Authenticates with the shared secret, as Nat's tools do."
+
+    def __init__(self, **kwargs):
+        super().__init__(headers={"Authorization": f"Bearer {SECRET}"}, **kwargs)
+
+
+@override_settings(FACTORY_SHARED_SECRET=SECRET)
+class ApiTestCase(TestCase):
+    client_class = OperatorClient
 
 
 def make_ticket(**kwargs) -> Ticket:
@@ -14,7 +28,7 @@ def make_ticket(**kwargs) -> Ticket:
     return Ticket.objects.create(**{**defaults, **kwargs})
 
 
-class TicketListTests(TestCase):
+class TicketListTests(ApiTestCase):
     def test_lists_tickets(self):
         t = make_ticket()
         resp = self.client.get(reverse("tickets:list"))
@@ -49,17 +63,25 @@ class TicketListTests(TestCase):
             self.client.get(reverse("tickets:list"))
 
     def test_invalid_state_is_400(self):
-        resp = self.client.get(reverse("tickets:list"), {"state": "bogus-8cu1Ocl26NikXaEYF-hyeZDXZ8tQIWW39JpZOtjSzpw"})
+        resp = self.client.get(
+            reverse("tickets:list"),
+            {"state": "bogus-8cu1Ocl26NikXaEYF-hyeZDXZ8tQIWW39JpZOtjSzpw"},
+        )
         self.assertEqual(resp.status_code, 400)
 
 
-class TicketDetailTests(TestCase):
+class TicketDetailTests(ApiTestCase):
     def test_detail_omits_verify_command(self):
         t = make_ticket()
         resp = self.client.get(reverse("tickets:detail", args=[t.pk]))
         self.assertEqual(resp.status_code, 200)
         self.assertNotIn("verify_command", resp.json())
         self.assertNotIn(t.verify_command, resp.content.decode())
+
+    def test_detail_includes_conformance_script(self):
+        t = make_ticket(conformance_script="#!/bin/sh\nscripts/verify.py let\n")
+        resp = self.client.get(reverse("tickets:detail", args=[t.pk]))
+        self.assertEqual(resp.json()["conformance_script"], t.conformance_script)
 
     def test_detail_includes_note_count(self):
         t = make_ticket()
@@ -80,7 +102,7 @@ class TicketDetailTests(TestCase):
         self.assertEqual(resp.status_code, 404)
 
 
-class TicketNotesTests(TestCase):
+class TicketNotesTests(ApiTestCase):
     def test_post_then_get_notes(self):
         t = make_ticket()
         url = reverse("tickets:notes", args=[t.pk])
@@ -128,10 +150,8 @@ class TicketNotesTests(TestCase):
         self.assertEqual(t.ticketnote_set.count(), 0)
 
     def test_post_works_without_csrf_token(self):
-        from django.test import Client
-
         t = make_ticket()
-        client = Client(enforce_csrf_checks=True)
+        client = OperatorClient(enforce_csrf_checks=True)
         resp = client.post(
             reverse("tickets:notes", args=[t.pk]), "hi", content_type="text/markdown"
         )
