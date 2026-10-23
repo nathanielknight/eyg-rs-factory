@@ -3,7 +3,9 @@ from django.http import HttpResponse, JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_GET, require_http_methods
 
-from .models import Ticket, TicketNote, TicketState
+from workflow.state import refresh_ticket_state
+
+from .models import NoteSource, Ticket, TicketNote, TicketState
 
 
 def _summary(ticket: Ticket) -> dict:
@@ -19,6 +21,8 @@ def _summary(ticket: Ticket) -> dict:
 @require_GET
 def ticket_list(request):
     tickets = Ticket.objects.order_by("modified_at")
+    if request.dev_run is not None:
+        tickets = tickets.filter(pk=request.dev_run.ticket_id)
     state = request.GET.get("state")
     if state is not None:
         if state not in TicketState.values:
@@ -34,8 +38,15 @@ def _not_found(pk: int) -> JsonResponse:
     return JsonResponse({"error": f"ticket {pk} not found"}, status=404)
 
 
+def _out_of_scope(request, pk: int) -> bool:
+    "A dev run's token only reaches its own ticket; others look missing."
+    return request.dev_run is not None and request.dev_run.ticket_id != pk
+
+
 @require_GET
 def ticket_detail(request, pk: int):
+    if _out_of_scope(request, pk):
+        return _not_found(pk)
     # One query: the note count is a joined aggregate. verify_command is
     # deliberately withheld (it's the holdout check), so don't even load it.
     ticket = (
@@ -51,13 +62,14 @@ def ticket_detail(request, pk: int):
             **_summary(ticket),
             "description": ticket.description,
             "test_command": ticket.test_command,
+            "conformance_script": ticket.conformance_script,
             "note_count": ticket.note_count,
         }
     )
 
 
-def _note_markdown(created_at, content: str) -> str:
-    return f"_{created_at.isoformat()}_\n\n{content}"
+def _note_markdown(created_at, source: str, content: str) -> str:
+    return f"_{created_at.isoformat()} · {NoteSource(source).label}_\n\n{content}"
 
 
 def _list_notes(pk: int) -> HttpResponse:
@@ -66,13 +78,18 @@ def _list_notes(pk: int) -> HttpResponse:
     rows = list(
         Ticket.objects.filter(pk=pk)
         .order_by("ticketnote__created_at", "ticketnote__pk")
-        .values_list("ticketnote__pk", "ticketnote__created_at", "ticketnote__content")
+        .values_list(
+            "ticketnote__pk",
+            "ticketnote__created_at",
+            "ticketnote__source",
+            "ticketnote__content",
+        )
     )
     if not rows:
         return _not_found(pk)
     body = "\n\n---\n\n".join(
-        _note_markdown(created_at, content)
-        for note_pk, created_at, content in rows
+        _note_markdown(created_at, source, content)
+        for note_pk, created_at, source, content in rows
         if note_pk is not None
     )
     return HttpResponse(body, content_type="text/markdown; charset=utf-8")
@@ -86,11 +103,26 @@ def _add_note(request, pk: int) -> JsonResponse:
     # against a missing ticket can't be relied on to fail; check first.
     if not Ticket.objects.filter(pk=pk).exists():
         return _not_found(pk)
-    note = TicketNote.objects.create(ticket_id=pk, content=content)
+    dev_run = request.dev_run
+    if dev_run is None:
+        note = TicketNote.objects.create(
+            ticket_id=pk, content=content, source=NoteSource.HUMAN
+        )
+        # A human note restarts the ticket's retry budgets.
+        refresh_ticket_state(pk)
+    else:
+        # Once a run has submitted, its code may be running in CI next to the
+        # holdout set; it gets no more say on the ticket.
+        if hasattr(dev_run, "submission"):
+            return JsonResponse({"error": "this run has already submitted"}, status=403)
+        note = TicketNote.objects.create(
+            ticket_id=pk, content=content, source=NoteSource.DEV_RUN, dev_run=dev_run
+        )
     return JsonResponse(
         {
             "id": note.pk,
             "ticket": pk,
+            "source": note.source,
             "content": note.content,
             "created_at": note.created_at.isoformat(),
         },
@@ -101,6 +133,8 @@ def _add_note(request, pk: int) -> JsonResponse:
 @csrf_exempt
 @require_http_methods(["GET", "POST"])
 def ticket_notes(request, pk: int):
+    if _out_of_scope(request, pk):
+        return _not_found(pk)
     if request.method == "POST":
         return _add_note(request, pk)
     return _list_notes(pk)
