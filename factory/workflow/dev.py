@@ -2,7 +2,9 @@
 
 A dev run's VM gets a clone of main, the rendered prompt, the `factory` CLI
 and a per-run token for the agent bridge. Its stdout is Claude's stream-json
-transcript, captured host-side by the runner.
+transcript, captured host-side by the runner. WORKFLOW_DEV_AGENT swaps
+Claude for another program (run on the prompt's path), e.g. to exercise the
+workflow without spending a session.
 
 Secrets (the run token, the Claude token) go into the VM as a file, never
 into the Invocation row, and the host copy is deleted once the run ends.
@@ -49,6 +51,7 @@ git clone --quiet --branch main {HOME}/repo.bundle .
 git remote remove origin
 git config user.name "factory agent"
 git config user.email agent@factory.invalid
+if [ -e {HOME}/agent ]; then exec {HOME}/agent {HOME}/prompt.md; fi
 exec claude -p "$(cat {HOME}/prompt.md)" \\
     --session-id "$FACTORY_SESSION_ID" \\
     --output-format stream-json --verbose \\
@@ -98,9 +101,15 @@ def dispatch(runner: IncusRunner, repo: Repo, ticket: Ticket) -> DevRun:
         (stage / name).write_text(text)
     (stage / "secrets.env").chmod(0o600)
     shutil.copy(GUEST / "factory_cli.py", stage / "factory")
+    if settings.WORKFLOW_DEV_AGENT:
+        shutil.copy(settings.WORKFLOW_DEV_AGENT, stage / "agent")
 
     def push(name, guest, mode=0o644):
         return Input(stage / name, guest, mode=mode, uid=AGENT_UID, gid=AGENT_GID)
+
+    agent = (
+        [push("agent", f"{HOME}/agent", 0o755)] if settings.WORKFLOW_DEV_AGENT else []
+    )
 
     spec = RunSpec(
         name=f"dev ticket {ticket.pk}",
@@ -112,6 +121,7 @@ def dispatch(runner: IncusRunner, repo: Repo, ticket: Ticket) -> DevRun:
             push("secrets.env", f"{HOME}/secrets.env", 0o600),
             push("run-dev.sh", f"{HOME}/run-dev.sh", 0o755),
             push("factory", f"{HOME}/.local/bin/factory", 0o755),
+            *agent,
         ],
         argv=[f"{HOME}/run-dev.sh"],
         env={

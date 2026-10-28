@@ -64,6 +64,21 @@ class DispatchTests(WorkflowTestCase):
         self.assertNotIn("sk-claude-secret", row)
         self.assertNotEqual(dev_run.token_hash, token)
 
+    def test_runs_a_configured_agent_in_place_of_claude(self):
+        script = self.tmp / "fake-agent.sh"
+        script.write_text("#!/bin/sh\nfactory submit --summary fake\n")
+        with self.settings(WORKFLOW_DEV_AGENT=str(script)):
+            dev_run, _ = self.dispatch()
+        inv = Invocation.objects.get(pk=dev_run.invocation_id)
+        [agent] = [i for i in inv.inputs if i["guest_path"] == "/home/agent/agent"]
+        self.assertEqual(Path(agent["host_path"]).read_text(), script.read_text())
+
+    def test_runs_claude_by_default(self):
+        dev_run, _ = self.dispatch()
+        inv = Invocation.objects.get(pk=dev_run.invocation_id)
+        guest_paths = [i["guest_path"] for i in inv.inputs]
+        self.assertNotIn("/home/agent/agent", guest_paths)
+
     def test_secrets_file_is_deleted_once_collected(self):
         dev_run, _ = self.dispatch()
         secrets = dev._staging_dir(dev_run.session_id) / "secrets.env"
