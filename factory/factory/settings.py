@@ -26,7 +26,8 @@ SECRET_KEY = "django-insecure-@88b=*%tr9pf97w^$t!$q7!33#+qd3-h_$b_%lmsnc%^p_p5%f
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = ["localhost"]
+# Dev-run VMs reach the API at its address on the agent bridge.
+ALLOWED_HOSTS = ["localhost", "10.196.0.1"]
 
 
 # Application definition
@@ -110,6 +111,9 @@ WORKFLOW_AGENT_SOURCE = {
 WORKFLOW_AGENT_PROFILES = ["default", "eyg-golden", "eyg-agent"]
 WORKFLOW_AGENT_API_URL = "http://10.196.0.1:8080"
 WORKFLOW_CLAUDE_TOKEN = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN", "")
+# An executable to run in place of Claude, with the prompt file's path as its
+# argument; unset runs Claude.
+WORKFLOW_DEV_AGENT = os.environ.get("WORKFLOW_DEV_AGENT", "")
 WORKFLOW_DEV_TIMEOUT_S = 2 * 60 * 60
 WORKFLOW_DEV_MAX_LOG_BYTES = 512 * 1024 * 1024  # stdout is the transcript
 

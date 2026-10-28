@@ -14,7 +14,7 @@ class Command(BaseCommand):
     )
 
     def handle(self, *args, **options):
-        if not settings.WORKFLOW_CLAUDE_TOKEN:
+        if not (settings.WORKFLOW_CLAUDE_TOKEN or settings.WORKFLOW_DEV_AGENT):
             raise CommandError("CLAUDE_CODE_OAUTH_TOKEN is not set")
         runner = get_runner()
         try:
