@@ -1,4 +1,8 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.13"
+# dependencies = []
+# ///
 """factory: the agent's line to the factory, from inside a dev run VM.
 
     factory ticket                          show the ticket
@@ -8,7 +12,9 @@
                                             submit HEAD (commit first)
 
 Reads FACTORY_URL, FACTORY_TOKEN, FACTORY_TICKET and FACTORY_BASE_SHA from
-the environment. Standard library only; this runs on the guest's python3.
+the environment. Baked into the golden image as /usr/local/bin/factory by
+scripts/build-golden-image.sh. Standard library only, so `uv run` needs no
+package index from inside the VM.
 """
 
 import argparse

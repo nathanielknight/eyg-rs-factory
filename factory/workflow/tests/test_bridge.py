@@ -1,11 +1,19 @@
+import importlib.util
+from pathlib import Path
+
 from django.test import Client
 
 from ticket.models import NoteSource, TicketNote
 from workflow import dev
-from workflow.guest import factory_cli
 from workflow.models import Submission
 
 from .helpers import WorkflowTestCase
+
+# The guest CLI lives outside the Django project, so load it by path.
+_CLI = Path(__file__).resolve().parents[3] / "guest" / "factory.py"
+_spec = importlib.util.spec_from_file_location("factory_cli", _CLI)
+factory_cli = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(factory_cli)
 
 
 def bearer(token, **kwargs):
