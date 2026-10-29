@@ -1,7 +1,8 @@
 """Dev runs: dispatch a ticket to an agent VM, then collect what came of it.
 
-A dev run's VM gets a clone of main, the rendered prompt, the `factory` CLI
-and a per-run token for the agent bridge. Its stdout is Claude's stream-json
+A dev run's VM gets a clone of main, the rendered prompt and a per-run token
+for the agent bridge; the `factory` CLI that uses the token is baked into the
+golden image (see guest/factory.py). Its stdout is Claude's stream-json
 transcript, captured host-side by the runner. WORKFLOW_DEV_AGENT swaps
 Claude for another program (run on the prompt's path), e.g. to exercise the
 workflow without spending a session.
@@ -35,7 +36,6 @@ from .support import add_note
 
 log = logging.getLogger(__name__)
 
-GUEST = Path(__file__).parent / "guest"
 HOME = "/home/agent"
 WORK = f"{HOME}/work"
 AGENT_UID = AGENT_GID = 1000
@@ -100,7 +100,6 @@ def dispatch(runner: IncusRunner, repo: Repo, ticket: Ticket) -> DevRun:
     for name, text in files.items():
         (stage / name).write_text(text)
     (stage / "secrets.env").chmod(0o600)
-    shutil.copy(GUEST / "factory_cli.py", stage / "factory")
     if settings.WORKFLOW_DEV_AGENT:
         shutil.copy(settings.WORKFLOW_DEV_AGENT, stage / "agent")
 
@@ -120,7 +119,6 @@ def dispatch(runner: IncusRunner, repo: Repo, ticket: Ticket) -> DevRun:
             push("prompt.md", f"{HOME}/prompt.md"),
             push("secrets.env", f"{HOME}/secrets.env", 0o600),
             push("run-dev.sh", f"{HOME}/run-dev.sh", 0o755),
-            push("factory", f"{HOME}/.local/bin/factory", 0o755),
             *agent,
         ],
         argv=[f"{HOME}/run-dev.sh"],

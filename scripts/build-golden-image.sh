@@ -38,6 +38,10 @@ echo "Waiting for cloud-init (this takes a few minutes)..."
 pincus exec "$BUILDER" -- cloud-init status --wait --long
 pincus exec "$BUILDER" -- test -f /var/lib/eyg-golden-ready
 
+# The agent's `factory` CLI (a uv script; see guest/factory.py).
+pincus file push guest/factory.py "$BUILDER/usr/local/bin/factory" \
+    --uid 0 --gid 0 --mode 0755
+
 echo "Checking tools..."
 pincus exec "$BUILDER" -- su - agent -c '
     set -e
@@ -47,6 +51,7 @@ pincus exec "$BUILDER" -- su - agent -c '
     uv --version
     python --version
     claude --version
+    factory --help >/dev/null
 '
 
 # Instances launched from the image must not re-run the cloud-init build, and
