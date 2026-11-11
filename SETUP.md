@@ -66,21 +66,21 @@ so root inside the guest can't lift them:
 
 | Mode    | Bridge (subnet)                 | Can reach                                                      |
 |---------|---------------------------------|----------------------------------------------------------------|
-| `ci`    | `eygcibr0` (10.197.0.0/24)      | host `10.197.0.1:8080` only                                    |
-| `agent` | `eygagentbr0` (10.196.0.0/24)   | host `10.196.0.1:8080` + Anthropic API (`160.79.104.0/23:443`) |
+| `ci`    | `eygcibr0` (10.197.0.0/24)      | nothing                                 |
+| `agent` | `eygagentbr0` (10.196.0.0/24)   | Anthropic API (`160.79.104.0/23:443`)   |
 
 The ACLs are on the bridges rather than the NICs because Incus 6.0 looks NIC
 ACLs up in the instance's project, where they don't exist. So whatever is
 plugged into a bridge gets that bridge's limits.
 
-Nothing else is reachable: no other host ports, LAN, Tailscale, internet, or
-other VMs. The bridges' own DNS resolves only `anthropic.com` names on
+Nothing else is reachable: no host ports, LAN, Tailscale, internet, or other
+VMs. The VMs never talk to the factory: it pushes files in and pulls files out
+over the Incus API, so its admin only needs to listen on localhost. The bridges' own DNS resolves only `anthropic.com` names on
 `eygagentbr0` and nothing on `eygcibr0`, but Incus lets VMs reach port 53 on
 any host address, so other resolvers on the host (e.g. `incusbr0`'s) answer
 them. DNS tunnelling is outside the threat model. Spoofed source addresses are
 dropped. **Package registries are
-not reachable either**, so dependencies must be in the image or served via the
-coordinator.
+not reachable either**, so dependencies must be in the image.
 
 Create or update the bridges and ACLs (in `default`) and the profiles (in the
 factory project) (safe to re-run after editing
@@ -90,10 +90,6 @@ factory project) (safe to re-run after editing
 ```
 ./scripts/setup-network.sh
 ```
-
-The coordinator API must listen on both `10.196.0.1:8080` and
-`10.197.0.1:8080`. To change the port, edit both ACL files and re-run the setup
-script.
 
 Launch with the script. It checks the VM is on its mode's bridge, and that the
 bridge carries the mode's ACL, and deletes the VM if not:

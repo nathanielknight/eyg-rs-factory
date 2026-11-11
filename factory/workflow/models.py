@@ -2,8 +2,8 @@
 
 Each link is a straight shot that can stop at any step; dead ends are kept.
 There are no links between attempts: a retry starts from main plus the
-ticket's notes. Rows are written by the agent bridge (Submission) and the
-batch commands (everything else), and are left alone once terminal.
+ticket's notes. Rows are written by the batch commands, and are left alone
+once terminal.
 
 VM details (instance name, image fingerprint, logs, exit code, timings) live
 on runner.Invocation; the runs here point at it.
@@ -117,13 +117,14 @@ class DevRun(VMRun):
         help_text="The last note the run saw; notes are append-only.",
     )
     prompt_version = models.CharField(max_length=64)
-    prompt = models.TextField(help_text="As rendered and given to the agent.")
+    prompt = models.TextField(
+        help_text=(
+            "As rendered and given to the agent; the ticket and notes it "
+            "points at are kept in the run's staging directory."
+        )
+    )
     test_command = models.TextField()
     session_id = models.UUIDField(unique=True, help_text="The Claude session ID.")
-
-    # The run's bearer token for the agent bridge, as sha256 hex. The token
-    # itself only ever goes into the VM.
-    token_hash = models.CharField(max_length=64, unique=True, editable=False)
 
     transcript_path = models.CharField(
         max_length=4096,
@@ -151,15 +152,13 @@ class ReviewDecision(models.TextChoices):
 class Submission(models.Model):
     """A dev run's proposed change: a git bundle plus the agent's summary.
 
-    Pending until it has a validation run. The bundle is verified on upload
-    but only fetched into the bare repo by the validate command.
+    Made when the run is collected, if the agent left a SUBMIT.md. Pending
+    until it has a validation run. The bundle is verified then, but only
+    fetched into the bare repo by the validate command.
     """
 
     dev_run = models.OneToOneField(
         DevRun, on_delete=models.PROTECT, related_name="submission"
-    )
-    external_id = models.CharField(
-        max_length=64, unique=True, help_text="Client-chosen, for idempotent retries."
     )
     bundle_path = models.CharField(max_length=4096)
     head_sha = models.CharField(max_length=64)

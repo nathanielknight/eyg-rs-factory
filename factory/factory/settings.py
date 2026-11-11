@@ -26,8 +26,9 @@ SECRET_KEY = "django-insecure-@88b=*%tr9pf97w^$t!$q7!33#+qd3-h_$b_%lmsnc%^p_p5%f
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-# Dev-run VMs reach the API at its address on the agent bridge.
-ALLOWED_HOSTS = ["localhost", "10.196.0.1"]
+# The admin is the only thing served, and only to the host itself: nothing in
+# a VM talks to the factory.
+ALLOWED_HOSTS = ["localhost", "127.0.0.1"]
 
 
 # Application definition
@@ -52,13 +53,7 @@ MIDDLEWARE = [
     "django.contrib.auth.middleware.AuthenticationMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
-    "ticket.middleware.AgentBridgeAuthMiddleware",
 ]
-
-# Shared secret for the agent bridge API (/tickets/, /submissions/), for Nat's
-# own tools; managed out-of-band via environment. Dev runs use their own
-# per-run tokens instead.
-FACTORY_SHARED_SECRET = os.environ.get("FACTORY_SHARED_SECRET", "")
 
 # Guest runner (see runner/). The Incus socket owns the host; only the factory
 # service user should be able to reach it.
@@ -76,12 +71,12 @@ RUNNER_LEASE_S = 900
 # The bare repo that main lives in; only the batch commands write to it.
 WORKFLOW_REPO = Path(os.environ.get("WORKFLOW_REPO", BASE_DIR / "repo.git"))
 WORKFLOW_MAIN_BRANCH = "main"
-# Staged VM inputs, uploaded bundles and lock files.
+# Staged VM inputs and lock files.
 WORKFLOW_ROOT = Path(os.environ.get("WORKFLOW_ROOT", BASE_DIR / "workflow-data"))
-# Requests from these networks are refused outright: CI VMs run submitted code
-# next to the holdout set, and must not be able to post anything back.
-WORKFLOW_UNTRUSTED_NETWORKS = ["10.197.0.0/24"]
+# Caps on what's pulled out of a dev run's VM: its bundle of commits, and the
+# notes it leaves for the next attempt.
 WORKFLOW_MAX_BUNDLE_BYTES = 64 * 1024 * 1024
+WORKFLOW_MAX_NOTE_BYTES = 256 * 1024
 # Retry budgets, counted from a ticket's latest human note.
 WORKFLOW_MAX_ATTEMPTS = 3  # dev runs that ran to the end
 WORKFLOW_MAX_INFRA_ERRORS = 3  # consecutive errored dev or validation runs
@@ -109,11 +104,11 @@ WORKFLOW_AGENT_SOURCE = {
     "fingerprint": os.environ.get("WORKFLOW_IMAGE_FINGERPRINT", ""),
 }
 WORKFLOW_AGENT_PROFILES = ["default", "eyg-golden", "eyg-agent"]
-WORKFLOW_AGENT_API_URL = "http://10.196.0.1:8080"
 WORKFLOW_CLAUDE_TOKEN = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN", "")
 # An executable to run in place of Claude, with the prompt file's path as its
 # argument; unset runs Claude.
 WORKFLOW_DEV_AGENT = os.environ.get("WORKFLOW_DEV_AGENT", "")
+# The agent's budget, kept by the driver script inside the VM.
 WORKFLOW_DEV_TIMEOUT_S = 2 * 60 * 60
 WORKFLOW_DEV_MAX_LOG_BYTES = 512 * 1024 * 1024  # stdout is the transcript
 

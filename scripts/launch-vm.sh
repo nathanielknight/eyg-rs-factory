@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Launch a network-restricted VM from the golden image.
 #
-#   scripts/launch-vm.sh agent NAME   # host coordinator port + Anthropic API
-#   scripts/launch-vm.sh ci NAME      # host coordinator port only
+#   scripts/launch-vm.sh agent NAME   # Anthropic API only
+#   scripts/launch-vm.sh ci NAME      # no network
 #
 # The VM goes in the Incus project EYG_INCUS_PROJECT (default `factory`).
 set -euo pipefail

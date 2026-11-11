@@ -2,6 +2,7 @@ from django.core.management.base import BaseCommand
 
 from runner.runner import get_runner
 from workflow.dev import collect_all
+from workflow.git import get_repo
 from workflow.support import LockBusy, batch_lock
 
 
@@ -14,6 +15,6 @@ class Command(BaseCommand):
     def handle(self, *args, **options):
         try:
             with batch_lock("dev"):
-                collect_all(get_runner())
+                collect_all(get_runner(), get_repo())
         except LockBusy:
             self.stdout.write("another dev worker is running")

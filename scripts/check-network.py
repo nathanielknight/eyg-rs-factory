@@ -18,8 +18,8 @@ on any mismatch. Each VM is deleted afterwards.
 
 Run it after changing the bridges, ACLs, profiles or host firewall. While it
 runs it listens on ports 8080 and 8081 of each bridge IP (skipping any already
-in use, e.g. by the coordinator), so an allowed port shows up as open rather
-than refused.
+in use), so a port the ACLs wrongly let through shows up as open rather than
+refused.
 """
 
 import argparse
@@ -36,8 +36,10 @@ SCRIPTS = Path(__file__).resolve().parent
 PROJECT = os.environ.get("EYG_INCUS_PROJECT", "factory")
 
 BRIDGE_IP = {"agent": "10.196.0.1", "ci": "10.197.0.1"}
+# Listened on at the bridge IPs, but allowed by neither ACL: the VMs get no
+# host ports at all. (8080 was once the coordinator's.)
 COORDINATOR_PORT = 8080
-BLOCKED_PORT = 8081  # on the bridge IP, but not allowed by either ACL
+BLOCKED_PORT = 8081
 ANTHROPIC_IP = "160.79.104.10"  # inside 160.79.104.0/23
 
 # Runs as root in the guest. Arguments: own bridge IP, then every other host
@@ -123,7 +125,7 @@ def expected(mode: str, others: list[str]) -> dict[str, tuple[str, callable]]:
         "internet tcp 1.1.1.1:443": not_open,
         "internet ping 1.1.1.1": is_("no"),
         "internet dns 8.8.8.8": no_answer,
-        f"own tcp {own}:{COORDINATOR_PORT}": is_("open"),
+        f"own tcp {own}:{COORDINATOR_PORT}": not_open,
         f"own tcp {own}:{BLOCKED_PORT}": not_open,
         f"own tcp {own}:22": not_open,
     }

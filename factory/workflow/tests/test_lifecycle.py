@@ -1,4 +1,5 @@
 import json
+import tarfile
 from io import StringIO
 from pathlib import Path
 from unittest import mock
@@ -40,56 +41,68 @@ def state_of(ticket):
 
 class DispatchTests(WorkflowTestCase):
     def test_records_what_the_agent_was_given(self):
-        ticket = self.make_ticket()
+        ticket = self.make_ticket(verify_command="cargo test --test hidden")
         TicketNote.objects.create(ticket=ticket, content="Try the env first.")
         last = TicketNote.objects.create(
             ticket=ticket, content="Watch out for shadowing."
         )
-        dev_run, _ = self.dispatch(ticket)
+        dev_run = self.dispatch(ticket)
 
         self.assertEqual(dev_run.base_sha, self.repo.main_sha())
         self.assertEqual(dev_run.notes_through, last)
-        self.assertIn("Watch out for shadowing.", dev_run.prompt)
-        self.assertIn(ticket.description, dev_run.prompt)
+        self.assertIn(dev_run.base_sha, dev_run.prompt)
+        given = dev._staging_dir(dev_run.session_id) / "in"
+        self.assertIn(ticket.description, (given / "ticket.md").read_text())
+        self.assertEqual(
+            [p.name for p in sorted((given / "notes").iterdir())],
+            ["001-human.md", "002-human.md"],
+        )
+        self.assertIn(
+            "Watch out for shadowing.", (given / "notes/002-human.md").read_text()
+        )
+        with tarfile.open(given.parent / "in.tar") as tar:
+            self.assertEqual(
+                sorted(tar.getnames()),
+                ["notes", "notes/001-human.md", "notes/002-human.md", "ticket.md"],
+            )
+        self.assertNotIn(ticket.verify_command, (given / "ticket.md").read_text())
         self.assertEqual(dev_run.test_command, "cargo test")
         self.assertEqual(dev_run.status, RunStatus.QUEUED)
         self.assertEqual(state_of(ticket), TicketState.DEVELOPING)
 
     def test_secrets_stay_out_of_the_database(self):
         with self.settings(WORKFLOW_CLAUDE_TOKEN="sk-claude-secret"):
-            dev_run, token = self.dispatch()
+            dev_run = self.dispatch()
         inv = Invocation.objects.get(pk=dev_run.invocation_id)
         row = json.dumps([inv.env, inv.argv, inv.inputs])
-        self.assertNotIn(token, row)
         self.assertNotIn("sk-claude-secret", row)
-        self.assertNotEqual(dev_run.token_hash, token)
 
     def test_runs_a_configured_agent_in_place_of_claude(self):
         script = self.tmp / "fake-agent.sh"
-        script.write_text("#!/bin/sh\nfactory submit --summary fake\n")
+        script.write_text("#!/bin/sh\necho fake > ~/out/SUBMIT.md\n")
         with self.settings(WORKFLOW_DEV_AGENT=str(script)):
-            dev_run, _ = self.dispatch()
+            dev_run = self.dispatch()
         inv = Invocation.objects.get(pk=dev_run.invocation_id)
         [agent] = [i for i in inv.inputs if i["guest_path"] == "/home/agent/agent"]
         self.assertEqual(Path(agent["host_path"]).read_text(), script.read_text())
 
     def test_runs_claude_by_default(self):
-        dev_run, _ = self.dispatch()
+        dev_run = self.dispatch()
         inv = Invocation.objects.get(pk=dev_run.invocation_id)
         guest_paths = [i["guest_path"] for i in inv.inputs]
         self.assertNotIn("/home/agent/agent", guest_paths)
 
     def test_secrets_file_is_deleted_once_collected(self):
-        dev_run, _ = self.dispatch()
+        dev_run = self.dispatch()
         secrets = dev._staging_dir(dev_run.session_id) / "secrets.env"
         self.assertTrue(secrets.exists())
-        dev.drive(self.runner, dev_run)
+        dev.drive(self.runner, self.repo, dev_run)
         self.assertFalse(secrets.exists())
 
     def test_run_without_submission_has_not_converged(self):
-        dev_run, _ = self.dispatch()
+        dev_run = self.dispatch()
         self.incus.command = Command(exit_code=0)
-        dev.drive(self.runner, dev_run)
+        dev.drive(self.runner, self.repo, dev_run)
         dev_run.refresh_from_db()
         self.assertEqual(
             (dev_run.status, dev_run.outcome), (RunStatus.FINISHED, Outcome.FAILED)
@@ -100,18 +113,18 @@ class DispatchTests(WorkflowTestCase):
         self.assertEqual(state_of(dev_run.ticket), TicketState.OPEN)
 
     def test_infra_error_is_errored_not_failed(self):
-        dev_run, _ = self.dispatch()
+        dev_run = self.dispatch()
         self.incus.command = Command(vm_dies=True)
-        dev.drive(self.runner, dev_run)
+        dev.drive(self.runner, self.repo, dev_run)
         dev_run.refresh_from_db()
         self.assertEqual(dev_run.status, RunStatus.ERRORED)
         self.assertIsNone(dev_run.outcome)
 
     def test_collect_is_idempotent(self):
-        dev_run, _ = self.dispatch()
-        dev.drive(self.runner, dev_run)
-        dev.collect(dev_run)
-        dev.collect_all(self.runner)
+        dev_run = self.dispatch()
+        dev.drive(self.runner, self.repo, dev_run)
+        dev.collect(self.repo, dev_run)
+        dev.collect_all(self.runner, self.repo)
         self.assertEqual(len(notes(dev_run.ticket_id, NoteSource.SYSTEM)), 1)
 
     def test_dispatch_command_picks_oldest_open_ticket(self):
@@ -129,10 +142,10 @@ class DispatchTests(WorkflowTestCase):
         self.assertEqual(DevRun.objects.get().ticket, first)
 
     def test_cancelled_ticket_stops_its_live_run(self):
-        dev_run, _ = self.dispatch()
+        dev_run = self.dispatch()
         dev_run.ticket.cancelled_at = self.clock.now()
         dev_run.ticket.save()
-        dev.collect_all(self.runner)
+        dev.collect_all(self.runner, self.repo)
         dev_run.refresh_from_db()
         self.assertEqual(dev_run.status, RunStatus.CANCELLED)
         self.assertEqual(state_of(dev_run.ticket), TicketState.CANCELLED)
@@ -140,9 +153,9 @@ class DispatchTests(WorkflowTestCase):
 
 class RetryBudgetTests(WorkflowTestCase):
     def finish(self, ticket, **command):
-        dev_run, _ = self.dispatch(ticket)
+        dev_run = self.dispatch(ticket)
         self.incus.command = Command(**command)
-        dev.drive(self.runner, dev_run)
+        dev.drive(self.runner, self.repo, dev_run)
 
     def test_stalls_after_max_attempts_until_a_human_note(self):
         ticket = self.make_ticket()
@@ -153,9 +166,7 @@ class RetryBudgetTests(WorkflowTestCase):
             self.assertEqual(state_of(ticket), TicketState.STALLED)
             self.assertIsNone(dev.pick_ticket())
 
-            self.operator.post(
-                f"/tickets/{ticket.pk}/notes/", "Try X.", content_type="text/markdown"
-            )
+            TicketNote.objects.create(ticket=ticket, content="Try X.")
             self.assertEqual(state_of(ticket), TicketState.OPEN)
 
     def test_repeated_infra_errors_need_a_human(self):
@@ -304,7 +315,7 @@ class ValidationTests(WorkflowTestCase):
         self.assertEqual(sub.review_reason, "gate:ignore")
 
     def test_agent_review_flag_holds_the_merge(self):
-        dev_run, sub = self.submitted_run(review="true")
+        dev_run, sub = self.submitted_run(review="")
         self.assertEqual(sub.review_reason, "agent_flag")
         self.ci_results(passing_results())
         validation.validate(self.runner, self.repo, sub)
@@ -388,7 +399,7 @@ class ConstraintTests(WorkflowTestCase):
             )
 
     def test_outcome_only_when_finished(self):
-        dev_run, _ = self.dispatch()
+        dev_run = self.dispatch()
         with self.assertRaises(IntegrityError):
             DevRun.objects.filter(pk=dev_run.pk).update(outcome=Outcome.PASSED)
 

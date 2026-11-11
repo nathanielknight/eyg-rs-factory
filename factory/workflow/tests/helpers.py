@@ -4,7 +4,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from django.test import Client, TestCase
+from django.test import TestCase
 
 from runner.runner import IncusRunner
 from runner.tests.fake import Clock, Command, FakeIncus
@@ -12,8 +12,6 @@ from ticket.models import Ticket
 from workflow import dev
 from workflow.git import Repo
 from workflow.validation import RESULTS
-
-SECRET = "operator-secret"
 
 
 def git(cwd: Path, *args: str) -> str:
@@ -61,7 +59,6 @@ class WorkflowTestCase(TestCase):
             WORKFLOW_REPO=self.tmp / "repo.git",
             WORKFLOW_HOLDOUT_SUITES=[suites / "secret.json"],
             WORKFLOW_REVIEWERS=["nat@example.com"],
-            FACTORY_SHARED_SECRET=SECRET,
         )
         override.enable()
         self.addCleanup(override.disable)
@@ -85,7 +82,6 @@ class WorkflowTestCase(TestCase):
             sleep=self.clock.sleep,
             monotonic=self.clock.monotonic,
         )
-        self.operator = Client(headers={"Authorization": f"Bearer {SECRET}"})
 
     # -- git ---------------------------------------------------------------
 
@@ -127,42 +123,43 @@ class WorkflowTestCase(TestCase):
         return Ticket.objects.create(**{**defaults, **kwargs})
 
     def dispatch(self, ticket: Ticket | None = None):
-        "A dispatched dev run, before its VM runs, and its bridge token."
-        ticket = ticket or self.make_ticket()
-        dev_run = dev.dispatch(self.runner, self.repo, ticket)
-        secrets_env = (dev._staging_dir(dev_run.session_id) / "secrets.env").read_text()
-        token = next(
-            line.split("=", 1)[1].strip("'")
-            for line in secrets_env.splitlines()
-            if line.startswith("FACTORY_TOKEN=")
+        "A dispatched dev run, before its VM runs."
+        return dev.dispatch(self.runner, self.repo, ticket or self.make_ticket())
+
+    def returns(self, **files: bytes | str | Path) -> None:
+        """The next dev run's VM leaves these in its OUT directory: notes,
+        submit, review, bundle (a path) and uncommitted."""
+        guest = {
+            "notes": dev.NOTES,
+            "submit": dev.SUBMIT,
+            "review": dev.REVIEW,
+            "bundle": dev.BUNDLE,
+            "uncommitted": dev.UNCOMMITTED,
+        }
+        contents = {}
+        for name, value in files.items():
+            if isinstance(value, Path):
+                value = value.read_bytes()
+            elif isinstance(value, str):
+                value = value.encode()
+            contents[guest[name]] = value
+        self.incus.command = Command(
+            exit_code=0, stdout=b'{"type":"result"}\n', files=contents
         )
-        return dev_run, token
 
-    def submit(self, token: str, bundle: Path, head: str, **fields):
-        client = Client(headers={"Authorization": f"Bearer {token}"})
-        with bundle.open("rb") as f:
-            data = {
-                "submission_id": "11111111-2222-3333-4444-555555555555",
-                "ticket": "",
-                "summary": "Added let.",
-                "review": "false",
-                "head_sha": head,
-                "bundle": f,
-                **fields,
-            }
-            return client.post("/submissions/", data)
+    def drive(self, dev_run):
+        dev.drive(self.runner, self.repo, dev_run)
+        dev_run.refresh_from_db()
+        return dev_run
 
-    def submitted_run(self, files=None, **fields):
+    def submitted_run(self, files=None, **returned):
         "A dev run that submitted a change and ended; returns (dev_run, submission)."
-        dev_run, token = self.dispatch()
-        bundle, head = self.agent_change(
+        dev_run = self.dispatch()
+        bundle, _ = self.agent_change(
             dev_run.base_sha, files or {"src/let.rs": "// let\n"}
         )
-        resp = self.submit(token, bundle, head, ticket=str(dev_run.ticket_id), **fields)
-        self.assertEqual(resp.status_code, 201, resp.content)
-        self.incus.command = Command(exit_code=0, stdout=b'{"type":"result"}\n')
-        dev.drive(self.runner, dev_run)
-        dev_run.refresh_from_db()
+        self.returns(submit="Added let.\n", bundle=bundle, **returned)
+        self.drive(dev_run)
         return dev_run, dev_run.submission
 
     def ci_results(self, results: dict) -> None:
