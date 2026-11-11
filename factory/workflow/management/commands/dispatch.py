@@ -16,11 +16,11 @@ class Command(BaseCommand):
     def handle(self, *args, **options):
         if not (settings.WORKFLOW_CLAUDE_TOKEN or settings.WORKFLOW_DEV_AGENT):
             raise CommandError("CLAUDE_CODE_OAUTH_TOKEN is not set")
-        runner = get_runner()
+        runner, repo = get_runner(), get_repo()
         try:
             with batch_lock("dev"):
-                collect_all(runner)
-                dev_run = dispatch_next(runner, get_repo())
+                collect_all(runner, repo)
+                dev_run = dispatch_next(runner, repo)
         except LockBusy:
             self.stdout.write("another dev worker is running")
             return

@@ -1,6 +1,6 @@
-# Agent VMs: the coordinator port on the host, plus Anthropic's published
+# Agent VMs: nothing on the host, only Anthropic's published
 # inbound API range (https://platform.claude.com/docs/en/api/ip-addresses).
-description: EYG factory agent - host coordinator port and Anthropic API
+description: EYG factory agent - Anthropic API only
 egress:
   # The bridge already allows DHCP/DNS to itself; these rules keep the ACL
   # self-contained. DHCP discover is broadcast; ipv4_filtering on the NIC
@@ -21,12 +21,6 @@ egress:
     destination: 10.196.0.1/32
     destination_port: "53"
     description: DNS over TCP
-    state: enabled
-  - action: allow
-    protocol: tcp
-    destination: 10.196.0.1/32
-    destination_port: "8080"
-    description: coordinator API
     state: enabled
   - action: allow
     protocol: tcp

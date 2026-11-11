@@ -6,7 +6,7 @@ from .state import refresh_ticket_state
 
 
 class ReadOnlyAdmin(admin.ModelAdmin):
-    "Only the batch commands and the agent bridge write these."
+    "Only the batch commands write these."
 
     def has_add_permission(self, request):
         return False
@@ -23,7 +23,6 @@ class DevRunAdmin(ReadOnlyAdmin):
     list_display = ("id", "ticket", "status", "outcome", "created_at", "ended_at")
     list_filter = ("status", "outcome")
     search_fields = ("ticket__title", "session_id")
-    exclude = ("token_hash",)
 
 
 @admin.register(ValidationRun)
